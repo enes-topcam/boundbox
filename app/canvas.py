@@ -16,6 +16,7 @@ from .imageutil import box_caption
 MAX_SCALE = 12.0     # en fazla 1 resim pikseli = 12 ekran pikseli
 ZOOM_STEP = 1.2
 DRAG_THRESHOLD = 4
+EDGE_PAD = 30        # resmin çevresinde bırakılan boşluk (ekran pikseli); kenara tıklamayı kolaylaştırır
 
 
 class Canvas(QWidget):
@@ -23,6 +24,7 @@ class Canvas(QWidget):
     boxRightClicked = Signal(int, object)             # kutu index, global pozisyon
     hint = Signal(str)
     zoomChanged = Signal(int)                         # yüzde
+    pressed = Signal()                                # fotoğraf alanına tıklandı
 
     def __init__(self, color_fn, parent=None):
         super().__init__(parent)
@@ -90,7 +92,9 @@ class Canvas(QWidget):
     #  Koordinatlar
     # ================================================================
     def _fit_scale(self):
-        return min(self.width() / self.image.width(), self.height() / self.image.height())
+        w = max(1, self.width() - 2 * EDGE_PAD)
+        h = max(1, self.height() - 2 * EDGE_PAD)
+        return min(w / self.image.width(), h / self.image.height())
 
     def to_widget(self, x, y):
         return QPointF(self.ox + x * self.scale, self.oy + y * self.scale)
@@ -99,20 +103,25 @@ class Canvas(QWidget):
         return (p.x() - self.ox) / self.scale, (p.y() - self.oy) / self.scale
 
     def _inside(self, p):
+        """Resmin üstünde ya da kenarına EDGE_PAD kadar yakın mı (yakınsa kenara yapıştırılır)."""
         x, y = self.to_image(p)
-        return 0 <= x <= self.image.width() and 0 <= y <= self.image.height()
+        pad = EDGE_PAD / self.scale
+        return -pad <= x <= self.image.width() + pad and -pad <= y <= self.image.height() + pad
 
     def _clamp(self, x, y):
         return (min(max(x, 0.0), float(self.image.width())),
                 min(max(y, 0.0), float(self.image.height())))
 
     def _clamp_offset(self):
-        """Resmin ekrandan tamamen kaçmasını engeller; küçükse ortalar."""
+        """Resmin ekrandan kaçmasını engeller (kenarlarda EDGE_PAD kadar boşluk kalabilir); küçükse ortalar."""
         for axis in ("x", "y"):
             view = self.width() if axis == "x" else self.height()
             size = (self.image.width() if axis == "x" else self.image.height()) * self.scale
             o = self.ox if axis == "x" else self.oy
-            o = (view - size) / 2 if size <= view else min(0.0, max(view - size, o))
+            if size + 2 * EDGE_PAD <= view:
+                o = (view - size) / 2
+            else:
+                o = min(float(EDGE_PAD), max(view - size - EDGE_PAD, o))
             if axis == "x":
                 self.ox = o
             else:
@@ -168,6 +177,7 @@ class Canvas(QWidget):
         self.zoomChanged.emit(round(self.scale * 100))
 
     def mousePressEvent(self, e):
+        self.pressed.emit()
         if self.image is None:
             return
         p = e.position()
@@ -290,6 +300,6 @@ class Canvas(QWidget):
 
         # artı imleç çizgileri (köşeyi tam denk getirmek için)
         if self.mouse is not None and self.pan is None and self._inside(self.mouse):
-            p.setPen(QPen(QColor(255, 255, 255, 120), 1, Qt.PenStyle.DashLine))
+            p.setPen(QPen(QColor(255, 255, 255, 160), 1, Qt.PenStyle.DashLine))
             p.drawLine(QPointF(self.mouse.x(), 0), QPointF(self.mouse.x(), self.height()))
             p.drawLine(QPointF(0, self.mouse.y()), QPointF(self.width(), self.mouse.y()))

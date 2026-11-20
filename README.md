@@ -11,7 +11,7 @@ Fotoğraflara dikdörtgen kutu çizip sınıf ve özellik (attribute) atamak iç
 
 ### 1. Hazır program (Python gerekmez)
 
-1. [Releases](../../releases) sayfasından `Etiketleme-v1.0-windows.zip` dosyasını indir.
+1. [Releases](../../releases) sayfasından en son sürümün `Etiketleme-vX.X-windows.zip` dosyasını indir.
 2. Zip'i bir klasöre çıkar.
 3. `Etiketleme\Etiketleme.exe` dosyasına çift tıkla.
 
@@ -37,7 +37,7 @@ Windows'ta `baslat.bat` dosyasına çift tıklayarak da açabilirsin.
 |---|---|
 | A / D | Önceki / sonraki fotoğraf |
 | F | Sığdır |
-| Del | Seçili kutuyu sil |
+| Del | Seçili kutuyu sil (soldaki listede fotoğraf seçiliyken: fotoğrafı sil, onay sorar) |
 | Ctrl+Del | Fotoğrafı sil |
 | Ctrl+Z | Geri al |
 | Esc | Çizimi iptal et |

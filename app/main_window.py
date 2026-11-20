@@ -69,6 +69,9 @@ class MainWindow(QMainWindow):
         self.image_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.image_list.customContextMenuRequested.connect(self.on_image_menu)
         self.image_list.currentItemChanged.connect(self._on_image_selected)
+        # en son soldaki listeye tıklandıysa Del fotoğrafı siler, yoksa kutuyu
+        self.list_active = False
+        self.image_list.itemPressed.connect(lambda _: setattr(self, "list_active", True))
         self.progress_label = QLabel()
         ll.addWidget(QLabel("<b>Fotoğraflar</b>  <span style='color:gray'>(sağ tık: sil)</span>"))
         ll.addWidget(self.filter)
@@ -79,6 +82,7 @@ class MainWindow(QMainWindow):
         self.canvas = Canvas(lambda c: self.project.color(c) if self.project else "#fff")
         self.canvas.boxDrawn.connect(self.on_box_drawn)
         self.canvas.boxRightClicked.connect(self.on_box_menu)
+        self.canvas.pressed.connect(lambda: setattr(self, "list_active", False))
         self.canvas.hint.connect(lambda t: self.hint_label.setText(t))
         self.canvas.zoomChanged.connect(lambda z: self.zoom_label.setText(f"Zoom: %{z}" if z else ""))
 
@@ -123,6 +127,7 @@ class MainWindow(QMainWindow):
         self.box_list = QListWidget()
         self.box_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.box_list.currentRowChanged.connect(self.canvas.set_selected)
+        self.box_list.itemPressed.connect(lambda _: setattr(self, "list_active", False))
         self.box_list.itemDoubleClicked.connect(lambda _: self.edit_box(self.box_list.currentRow()))
         brow = QHBoxLayout()
         b_edit = QPushButton("Düzenle")
@@ -690,6 +695,9 @@ class MainWindow(QMainWindow):
         self._save()
 
     def delete_selected_box(self):
+        if self.list_active:
+            self.delete_images()      # onay penceresi delete_images içinde
+            return
         self.delete_box(self.box_list.currentRow())
 
     def on_box_menu(self, i, pos):
