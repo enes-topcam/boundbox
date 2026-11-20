@@ -3,14 +3,14 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy, QSplitter,
     QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import shortcuts
+from . import shortcuts, theme
 from .canvas import Canvas
 from .dialogs import DuplicateDialog, ExportDialog, LabelDialog, SettingsDialog, SetupDialog, color_icon
 from .exporters import Exporter
@@ -188,6 +188,38 @@ class MainWindow(QMainWindow):
         self.a_open_dir = act("📂 Klasörü Göster", self.show_folder)
         tb.addSeparator()
         self.a_settings = act("⚙ Ayarlar", self.open_settings)
+
+        # ---------- sağ üst: tema seçimi ----------
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(spacer)
+        current = self.settings.value("tema", "sistem")
+        self.theme_btn = QToolButton()
+        self.theme_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.theme_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.theme_btn.setStyleSheet("QToolButton { font-size: 15px; padding: 0 6px; }"
+                                     "QToolButton::menu-indicator { image: none; width: 0; }")
+        menu = QMenu(self.theme_btn)
+        group = QActionGroup(self)
+        for key, icon, name in theme.MODES:
+            a = menu.addAction(f"{icon}  {name}")
+            a.setCheckable(True)
+            a.setChecked(key == current)
+            a.triggered.connect(lambda _=False, k=key: self.set_theme(k))
+            group.addAction(a)
+        self.theme_btn.setMenu(menu)
+        tb.addWidget(self.theme_btn)
+        self._show_theme(current)
+
+    def _show_theme(self, key):
+        _, icon, name = next((m for m in theme.MODES if m[0] == key), theme.MODES[0])
+        self.theme_btn.setText(icon)
+        self.theme_btn.setToolTip(f"Tema: {name}  (değiştirmek için tıklayın)")
+
+    def set_theme(self, key):
+        theme.apply(key)
+        self.settings.setValue("tema", key)
+        self._show_theme(key)
 
     def _update_enabled(self):
         on = self.project is not None

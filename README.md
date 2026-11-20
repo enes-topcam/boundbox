@@ -6,6 +6,7 @@ Fotoğraflara dikdörtgen kutu çizip sınıf ve özellik (attribute) atamak iç
 - Sınıflar ve seçmeli özellikler (ör. `corba` → `mercimek / ezogelin / mantar`)
 - CVAT for images 1.1 XML içe aktarma
 - Dışa aktarma: JSON, COCO, YOLO, Pascal VOC XML, CVAT XML, etiketli JPG
+- Açık / koyu tema (sağ üstten seçilir, "Sistem" Windows ayarını takip eder)
 
 ## Kurulum
 
