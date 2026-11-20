@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+build/
+dist/
+*.spec
+
+# Test/örnek veri (kişisel bilgi içeriyor)
+online_viewer_net.xml
