@@ -23,8 +23,8 @@ Fotoğraflara dikdörtgen kutu çizip sınıf ve özellik (attribute) atamak iç
 Python 3.10 veya üstü gerekir.
 
 ```
-git clone <bu reponun linki>
-cd etiketleme
+git clone https://github.com/enes-topcam/boundbox.git
+cd boundbox
 pip install -r requirements.txt
 python main.py
 ```
