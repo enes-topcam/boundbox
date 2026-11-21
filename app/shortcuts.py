@@ -13,6 +13,8 @@ GENERAL = [
     ("sifirla", "Seçimi sıfırla (hiçbir şey seçili olmasın)", "X"),
     ("disa_aktar", "Dışa aktar", "Ctrl+E"),
     ("yenile", "Yenile", "F5"),
+    ("ses_ac_kapat", "Mikrofonu aç / kapat (sesle seçim)", "M"),
+    ("ses_baskonus", "Bas-konuş tuşu (basılı tutarken konuş)", "Space"),
 ]
 
 

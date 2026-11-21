@@ -7,6 +7,8 @@ Fotoğraflara dikdörtgen kutu çizip sınıf ve özellik (attribute) atamak iç
 - CVAT for images 1.1 XML içe aktarma
 - Dışa aktarma: JSON, COCO, YOLO, Pascal VOC XML, CVAT XML, etiketli JPG
 - Açık / koyu tema (sağ üstten seçilir, "Sistem" Windows ayarını takip eder)
+- Sesle seçim: "mercimek çorbası" de, corba → mercimek seçilsin; sen sadece kutuyu çiz
+- Etikete göre gezinme: sağdaki listede bir seçeneğin (ör. `mercimek`) solundaki oka tıkla, o etiketli fotoğraflar açılsın; birine tıklayınca A / D sadece onlarda gezer (üstteki mavi düğmeyle biter)
 
 ## Kurulum
 
@@ -48,11 +50,30 @@ Windows'ta `baslat.bat` dosyasına çift tıklayarak da açabilirsin.
 
 Kısayollar program içinden değiştirilebilir.
 
+## Sesle seçim
+
+Sağ üstteki 🎤 düğmesi mikrofonu açar / kapatır (kısayol **M**). Sınıfı ve seçeneği söylemen yeter:
+"mercimek çorbası" → `corba → mercimek`. Sadece "mercimek" demek de olur; aynı ad birden fazla
+sınıfta varsa sınıfı da söylemen gerekir.
+
+- **Bas-konuş** (varsayılan): **Space** basılı tutarken konuş, bırakınca seçilir.
+- **Sürekli dinle**: tuşa basmadan söylersin. Konuşurken simge yeşile döner.
+
+Dinleme şeklini ve mikrofonu 🎤 düğmesinin okundan seçebilirsin. İki tuşu da Ayarlar → Genel kısayollar'dan
+değiştirebilirsin. Program bir adı iyi anlamıyorsa Ayarlar → Sesle seçim'den ona **sesli ad** ver
+(ör. `ezogelin` için "ezo").
+
+Tanıma internetsiz, bilgisayarda yapılır ([Vosk](https://alphacephei.com/vosk/)). İlk açılışta Türkçe model
+(~37 MB) bir kere indirilir ve `%LOCALAPPDATA%\Etiketleme\models` klasörüne kaydedilir. İnternetsiz bir
+bilgisayarda kullanmak için modeli programın yanına, `models\vosk-model-small-tr-0.3` klasörüne koyabilirsin.
+
 ## Exe'yi kendin derlemek
 
 ```
 pip install pyinstaller
-pyinstaller --noconfirm --windowed --name Etiketleme main.py
+pyinstaller --noconfirm --windowed --name Etiketleme --collect-binaries vosk ^
+  --exclude-module numpy --exclude-module pandas --exclude-module scipy ^
+  --exclude-module matplotlib --exclude-module pyarrow main.py
 ```
 
 Çıktı `dist\Etiketleme\` klasörüne düşer.

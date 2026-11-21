@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import shortcuts
+from . import shortcuts, voice
 from .selection import KeySelector
 
 
@@ -476,7 +476,9 @@ def _key_text(ed):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, project, settings, parent=None):
+    TAB_SES = 2
+
+    def __init__(self, project, settings, parent=None, tab=0):
         super().__init__(parent)
         self.p = project
         self.settings = settings
@@ -537,6 +539,60 @@ class SettingsDialog(QDialog):
         l2.setRowStretch(len(shortcuts.GENERAL), 1)
         tabs.addTab(t2, "Genel kısayollar")
 
+        # ---------- sesle seçim ----------
+        t4 = QWidget()
+        l4 = QVBoxLayout(t4)
+        keys = shortcuts.load_general(settings)
+        info = QLabel(
+            "Seçmek istediğini söyle, ör. <b>\"mercimek çorbası\"</b> → corba → mercimek seçilir, "
+            "sen sadece kutuyu çizersin. Sadece seçeneği söylemek de yeter (<b>\"mercimek\"</b>).<br><br>"
+            f"Mikrofonu aç / kapat: <b>{keys['ses_ac_kapat'] or '—'}</b> ya da üstteki 🎤 simgesine tıkla. "
+            f"Bas-konuş tuşu: <b>{keys['ses_baskonus'] or '—'}</b>. Tuşları 'Genel kısayollar' sekmesinden "
+            "değiştirebilirsin.<br><br>"
+            "<b>Sesli ad:</b> program bir adı iyi anlamıyorsa ya da kısaca söylemek istersen buraya yaz. "
+            "Birden fazlası virgülle ayrılır (ör. <i>ezo, ezogelin</i>). Boş bırakılırsa adın kendisi kullanılır.")
+        info.setWordWrap(True)
+        l4.addWidget(info)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Dinleme şekli:"))
+        self.mode_buttons = {}
+        cur_mode = settings.value("ses/mod", "baskonus")
+        for key, text in voice.MODES:
+            rb = QRadioButton(text)
+            rb.setChecked(key == cur_mode)
+            self.mode_buttons[key] = rb
+            mode_row.addWidget(rb)
+        mode_row.addStretch()
+        l4.addLayout(mode_row)
+        self.voice_tree = QTreeWidget()
+        self.voice_tree.setHeaderLabels(["Sınıf / Seçenek", "Sesli ad"])
+        self.voice_tree.setColumnWidth(0, 240)
+        self.class_voice = {}     # sinif -> edit
+        self.option_voice = {}    # (sinif, attr, deger) -> edit
+
+        def voice_edit(value, name):
+            ed = QLineEdit(value or "")
+            ed.setPlaceholderText(name.replace("_", " "))
+            return ed
+        for c in project.classes:
+            top = QTreeWidgetItem([c["ad"]])
+            top.setIcon(0, color_icon(c["renk"]))
+            top.setFont(0, bold)
+            self.voice_tree.addTopLevelItem(top)
+            ed = voice_edit(c.get("sesli_ad"), c["ad"])
+            self.voice_tree.setItemWidget(top, 1, ed)
+            self.class_voice[c["ad"]] = ed
+            for a in c["attributeler"]:
+                for v in a["secenekler"]:
+                    v_item = QTreeWidgetItem([f"{v}   ({a['ad']})"])
+                    top.addChild(v_item)
+                    ed = voice_edit(a.get("sesli_adlar", {}).get(v), v)
+                    self.voice_tree.setItemWidget(v_item, 1, ed)
+                    self.option_voice[(c["ad"], a["ad"], v)] = ed
+        self.voice_tree.expandAll()
+        l4.addWidget(self.voice_tree)
+        tabs.addTab(t4, "Sesle seçim")
+
         # ---------- diğer ----------
         t3 = QWidget()
         l3 = QVBoxLayout(t3)
@@ -565,6 +621,7 @@ class SettingsDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.addWidget(tabs)
         lay.addWidget(buttons)
+        tabs.setCurrentIndex(tab)
 
     def _defaults(self):
         for i, ed in enumerate(self.class_edits.values()):
@@ -631,8 +688,13 @@ class SettingsDialog(QDialog):
             for a in c["attributeler"]:
                 a["kisayollar"] = {v: _key_text(self.option_edits[(c["ad"], a["ad"], v)])
                                    for v in a["secenekler"]}
+            c["sesli_ad"] = self.class_voice[c["ad"]].text().strip()
+            for a in c["attributeler"]:
+                a["sesli_adlar"] = {v: t for v in a["secenekler"]
+                                    if (t := self.option_voice[(c["ad"], a["ad"], v)].text().strip())}
         self.p.save()
         shortcuts.save_general(self.settings, {k: _key_text(ed) for k, ed in self.general_edits.items()})
+        self.settings.setValue("ses/mod", next((k for k, rb in self.mode_buttons.items() if rb.isChecked()), "baskonus"))
         self.accept()
 
 

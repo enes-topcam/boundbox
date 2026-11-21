@@ -8,3 +8,6 @@ dist/
 
 # Test/örnek veri (kişisel bilgi içeriyor)
 online_viewer_net.xml
+
+# Ses modeli (program ilk kullanımda indirir)
+models/

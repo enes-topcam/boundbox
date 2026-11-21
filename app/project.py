@@ -311,6 +311,7 @@ class Project:
         a = self.get_attr(cls_name, attr_name)
         a["secenekler"] = [v for v in a["secenekler"] if v != value]
         a.setdefault("kisayollar", {}).pop(value, None)
+        a.get("sesli_adlar", {}).pop(value, None)
         self.save()
 
         def fn(b):
@@ -356,6 +357,9 @@ class Project:
         keys = a.setdefault("kisayollar", {})
         if old in keys:
             keys[new] = keys.pop(old)
+        voices = a.get("sesli_adlar", {})
+        if old in voices:
+            voices[new] = voices.pop(old)
         self.save()
 
         def fn(b):
