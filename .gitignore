@@ -11,3 +11,8 @@ online_viewer_net.xml
 
 # Ses modeli (program ilk kullanımda indirir)
 models/
+
+# Dokümanlar ve tasarım kiti (yerel)
+docs/
+Etiketleme-Tasarim-Kiti.html
+Etiketleme-Tasarim-Rehberi.md

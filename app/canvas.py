@@ -4,27 +4,41 @@
 - Tekerlek: mouse'un olduğu yere doğru zoom
 - Sağ tık basılı tutup sürükle (veya orta tuş): fotoğrafta gezin
 - Sağ tık (sürüklemeden): çizimi iptal eder; çizim yokken kutunun üstünde menü açar
+- Kutunun kenarına / köşesine sol tık: o kenar fareyi takip eder, ikinci tıkla yerine oturur
+  (basılı tutup sürüklemek de olur). Kenardan yeni kutu başlatmak için Shift + tık.
 """
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtWidgets import QPushButton, QWidget
 
-from .imageutil import box_caption
+from . import theme
+from .imageutil import box_label
 
 MAX_SCALE = 12.0     # en fazla 1 resim pikseli = 12 ekran pikseli
 ZOOM_STEP = 1.2
 DRAG_THRESHOLD = 4
 EDGE_PAD = 30        # resmin çevresinde bırakılan boşluk (ekran pikseli); kenara tıklamayı kolaylaştırır
+HANDLE_TOL = 6       # kutu kenarını yakalama mesafesi (ekran pikseli)
+MIN_BOX = 3          # en küçük kutu (resim pikseli)
+
+_HANDLE_CURSORS = {
+    frozenset("l"): Qt.CursorShape.SizeHorCursor, frozenset("r"): Qt.CursorShape.SizeHorCursor,
+    frozenset("t"): Qt.CursorShape.SizeVerCursor, frozenset("b"): Qt.CursorShape.SizeVerCursor,
+    frozenset("lt"): Qt.CursorShape.SizeFDiagCursor, frozenset("rb"): Qt.CursorShape.SizeFDiagCursor,
+    frozenset("rt"): Qt.CursorShape.SizeBDiagCursor, frozenset("lb"): Qt.CursorShape.SizeBDiagCursor,
+}
 
 
 class Canvas(QWidget):
     boxDrawn = Signal(float, float, float, float)    # resim koordinatı x1, y1, x2, y2
     boxRightClicked = Signal(int, object)             # kutu index, global pozisyon
+    boxResized = Signal(int, float, float, float, float)  # kutu index, yeni x1, y1, x2, y2
     hint = Signal(str)
     zoomChanged = Signal(int)                         # yüzde
     pressed = Signal()                                # fotoğraf alanına tıklandı
+    emptyAction = Signal()                            # boş durumdaki düğmeye tıklandı
 
     def __init__(self, color_fn, parent=None):
         super().__init__(parent)
@@ -33,6 +47,14 @@ class Canvas(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(400, 300)
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self._dots = None          # noktalı zemin dokusu
+        self.empty_text = ""
+        self.empty_btn = QPushButton(self)
+        self.empty_btn.setProperty("primary", True)
+        self.empty_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.empty_btn.clicked.connect(self.emptyAction)
+        self.empty_btn.hide()
+        theme.notifier().changed.connect(self._theme_changed)
         self.image = None
         self.pix = None
         self.cache = None          # küçültülmüş resim (hız için)
@@ -46,6 +68,8 @@ class Canvas(QWidget):
         self.selected = -1
         self.hover = -1
         self.pan = None            # {"start", "ox", "oy", "button", "moved"}
+        self.edit = None           # kenar düzenleme: {"i", "sides", "orig", "rect", "press", "held", "moved"}
+        self._hint_text = None
 
     # ================================================================
     #  Dışarıdan çağrılanlar
@@ -56,13 +80,37 @@ class Canvas(QWidget):
         self.cache = None
         self.boxes = boxes
         self.first = None
+        self.edit = None
         self.selected = -1
         self.hover = -1
+        self._place_empty_button()
         self.fit()
         self._emit_hint()
 
+    def set_empty(self, text, button=""):
+        """Fotoğraf yokken ortada görünen yazı ve (varsa) düğme."""
+        self.empty_text = text
+        self.empty_btn.setText(button)
+        self.empty_btn.adjustSize()
+        self._place_empty_button()
+        self.update()
+
+    def _place_empty_button(self):
+        show = self.image is None and bool(self.empty_btn.text())
+        self.empty_btn.setVisible(show)
+        if show:
+            b = self.empty_btn
+            b.move(round((self.width() - b.width()) / 2), round(self.height() / 2 + 14))
+
+    def _theme_changed(self):
+        self._dots = None
+        self.update()
+
     def set_boxes(self, boxes):
         self.boxes = boxes
+        if self.edit and self.edit["i"] >= len(boxes):
+            self.edit = None
+            self._emit_hint()
         if self.selected >= len(boxes):
             self.selected = -1
         self.update()
@@ -72,6 +120,11 @@ class Canvas(QWidget):
         self.update()
 
     def cancel(self):
+        if self.edit is not None:
+            self.edit = None
+            self._update_cursor()
+            self.update()
+            return True
         if self.first is not None:
             self.first = None
             self.update()
@@ -136,18 +189,101 @@ class Canvas(QWidget):
         ]
         return min(hits)[1] if hits else -1
 
+    def _handle_at(self, p):
+        """Farenin altındaki kutu kenarı / köşesi: (kutu index, {"l","r","t","b"} alt kümesi) ya da None."""
+        best = None
+        for i, b in enumerate(self.boxes):
+            a, c = self.to_widget(b["x1"], b["y1"]), self.to_widget(b["x2"], b["y2"])
+            left, right = sorted((a.x(), c.x()))
+            top, bottom = sorted((a.y(), c.y()))
+            if not (left - HANDLE_TOL <= p.x() <= right + HANDLE_TOL
+                    and top - HANDLE_TOL <= p.y() <= bottom + HANDLE_TOL):
+                continue
+            d = {"l": abs(p.x() - left), "r": abs(p.x() - right),
+                 "t": abs(p.y() - top), "b": abs(p.y() - bottom)}
+            sides = set()
+            for h, v in (("l", "r"), ("t", "b")):
+                near = min((h, v), key=d.get)        # küçük kutuda iki kenar da yakınsa yakın olan
+                if d[near] <= HANDLE_TOL:
+                    sides.add(near)
+            if not sides:
+                continue
+            dist = min(d[x] for x in sides)
+            key = (dist, i != self.selected, (right - left) * (bottom - top))
+            if best is None or key < best[0]:
+                best = (key, i, frozenset(sides))
+        return (best[1], best[2]) if best else None
+
+    def _start_edit(self, i, sides, p):
+        b = self.boxes[i]
+        x1, x2 = sorted((b["x1"], b["x2"]))
+        y1, y2 = sorted((b["y1"], b["y2"]))
+        self.edit = {"i": i, "sides": sides, "orig": (x1, y1, x2, y2), "rect": [x1, y1, x2, y2],
+                     "press": p, "held": True, "moved": False}
+        self.hover = -1
+        self._emit_hint()
+
+    def _move_edit(self, p):
+        e = self.edit
+        x1, y1, x2, y2 = e["orig"]
+        px, py = self.to_image(e["press"])
+        mx, my = self.to_image(p)
+        dx, dy = mx - px, my - py
+        nx1, ny1, nx2, ny2 = x1, y1, x2, y2
+        if "l" in e["sides"]:
+            nx1 = x1 + dx
+        if "r" in e["sides"]:
+            nx2 = x2 + dx
+        if "t" in e["sides"]:
+            ny1 = y1 + dy
+        if "b" in e["sides"]:
+            ny2 = y2 + dy
+        nx1, ny1 = self._clamp(nx1, ny1)
+        nx2, ny2 = self._clamp(nx2, ny2)
+        e["rect"] = [nx1, ny1, nx2, ny2]
+
+    def _finish_edit(self):
+        e, self.edit = self.edit, None
+        x1, x2 = sorted((e["rect"][0], e["rect"][2]))
+        y1, y2 = sorted((e["rect"][1], e["rect"][3]))
+        self._update_cursor()
+        self.update()
+        if x2 - x1 >= MIN_BOX and y2 - y1 >= MIN_BOX and (x1, y1, x2, y2) != e["orig"]:
+            self.boxResized.emit(e["i"], x1, y1, x2, y2)
+
+    def _update_cursor(self):
+        shape = Qt.CursorShape.CrossCursor
+        if self.edit is not None:
+            shape = _HANDLE_CURSORS[self.edit["sides"]]
+        elif self.first is None and self.pan is None and self.mouse is not None and self.image is not None:
+            h = self._handle_at(self.mouse)
+            if h:
+                shape = _HANDLE_CURSORS[h[1]]
+        if self.cursor().shape() != shape:
+            self.setCursor(shape)
+        self._emit_hint()
+
     def _emit_hint(self):
         if self.image is None:
-            self.hint.emit("Soldan bir fotoğraf seçin.")
-        elif self.first is None:
-            self.hint.emit("Kutunun SOL ÜST köşesine tıklayın.")
+            text = "Soldan bir fotoğraf seç"
+        elif self.edit is not None:
+            text = ("Bırakınca yerine oturur · Esc iptal" if self.edit["held"]
+                    else "Kenarı yeni yerine götürüp tıkla · Esc iptal")
+        elif self.first is not None:
+            text = "Sağ alt köşeye tıkla · Esc iptal"
+        elif self.cursor().shape() != Qt.CursorShape.CrossCursor:
+            text = "Kenarı taşımak için tıkla ya da sürükle · Shift + tık: yeni kutu"
         else:
-            self.hint.emit("Şimdi SAĞ ALT köşeye tıklayın  (iptal: sağ tık / Esc)")
+            text = "Sol üst köşeye tıkla"
+        if text != self._hint_text:
+            self._hint_text = text
+            self.hint.emit(text)
 
     # ================================================================
     #  Olaylar
     # ================================================================
     def resizeEvent(self, e):
+        self._place_empty_button()
         if self.image is not None:
             if self.fitted:
                 self.fit()
@@ -182,6 +318,16 @@ class Canvas(QWidget):
             return
         p = e.position()
         if e.button() == Qt.MouseButton.LeftButton:
+            if self.edit is not None:            # tıkla-götür-tıkla: ikinci tık yerine oturtur
+                self._move_edit(p)
+                self._finish_edit()
+                return
+            shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            handle = self._handle_at(p) if self.first is None and not shift else None
+            if handle:
+                self._start_edit(handle[0], handle[1], p)
+                self.update()
+                return
             if self.first is None:
                 if self._inside(p):
                     self.first = self._clamp(*self.to_image(p))
@@ -212,15 +358,32 @@ class Canvas(QWidget):
                 self.oy = self.pan["oy"] + d.y()
                 self.fitted = False
                 self._clamp_offset()
-        self.hover = self._box_at(self.mouse) if self.first is None and self.pan is None else -1
+        if self.edit is not None:
+            d = self.mouse - self.edit["press"]
+            if self.edit["held"] and math.hypot(d.x(), d.y()) >= DRAG_THRESHOLD:
+                self.edit["moved"] = True
+            if self.pan is None:
+                self._move_edit(self.mouse)
+        self.hover = (self._box_at(self.mouse)
+                      if self.first is None and self.pan is None and self.edit is None else -1)
+        if self.pan is None:
+            self._update_cursor()
         self.update()
 
     def mouseReleaseEvent(self, e):
+        if self.edit is not None and self.edit["held"] and e.button() == Qt.MouseButton.LeftButton:
+            if self.edit["moved"]:               # sürükle-bırak
+                self._move_edit(e.position())
+                self._finish_edit()
+            else:                                # sadece tıklandı: kenar fareyi takip etsin
+                self.edit["held"] = False
+                self._emit_hint()
+            return
         if self.pan is None or e.button() != self.pan["button"]:
             return
         moved = self.pan["moved"]
         self.pan = None
-        self.setCursor(Qt.CursorShape.CrossCursor)
+        self._update_cursor()
         if moved or e.button() != Qt.MouseButton.RightButton:
             return
         # sürüklemeden sağ tık: iptal ya da kutu menüsü
@@ -258,48 +421,136 @@ class Canvas(QWidget):
                 target = QRectF(self.ox + x0 * s, self.oy + y0 * s, (x1 - x0) * s, (y1 - y0) * s)
                 p.drawPixmap(target, self.pix, QRectF(x0, y0, x1 - x0, y1 - y0))
 
+    def _dot_brush(self):
+        """Tuval zeminindeki silik nokta deseni (16 px aralıklı)."""
+        if self._dots is None:
+            dpr = self.devicePixelRatioF()
+            pm = QPixmap(round(16 * dpr), round(16 * dpr))
+            pm.fill(theme.qc("paper"))
+            q = QPainter(pm)
+            q.setRenderHint(QPainter.RenderHint.Antialiasing)
+            q.setPen(Qt.PenStyle.NoPen)
+            q.setBrush(QColor(175, 193, 211, 34))
+            q.drawEllipse(QPointF(pm.width() / 2, pm.height() / 2), dpr, dpr)
+            q.end()
+            pm.setDevicePixelRatio(dpr)
+            self._dots = QBrush(pm)
+        return self._dots
+
+    @staticmethod
+    def _handle(p, center, size):
+        r = QRectF(center.x() - size / 2, center.y() - size / 2, size, size)
+        p.setPen(QPen(QColor(theme.LABEL_BG), 1))
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawRoundedRect(r, 2, 2)
+
+    def _draw_label(self, p, rect, text, color, fm):
+        """Kutunun sol üstüne yapışık koyu başlık: ● sınıf › seçenek."""
+        pad, dot = 6, 6
+        avail = max(40, self.width() - rect.left() - 4)
+        text = fm.elidedText(text, Qt.TextElideMode.ElideRight, int(avail - pad * 2 - dot - 5))
+        tw = fm.horizontalAdvance(text) + pad * 2 + dot + 5
+        th = fm.height() + 6
+        x = rect.left() - 1
+        y = rect.top() - th - 1 if rect.top() - th - 1 >= 0 else rect.top() + 2   # en üstteyse içeri al
+        r = QRectF(x, y, tw, th)
+        path = QPainterPath()
+        path.addRoundedRect(r, 4, 4)
+        p.setPen(QPen(QColor(255, 255, 255, 34), 1))
+        p.setBrush(QColor(theme.LABEL_BG))
+        p.drawPath(path)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(color)
+        p.drawEllipse(QRectF(x + pad, r.center().y() - dot / 2, dot, dot))
+        p.setPen(QColor("#FFFFFF"))
+        p.drawText(QRectF(x + pad + dot + 5, y, tw, th), Qt.AlignmentFlag.AlignVCenter, text)
+
     def paintEvent(self, e):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor("#1e1e1e"))
+        p.fillRect(self.rect(), self._dot_brush())
         if self.image is None:
-            p.setPen(QColor("#aaaaaa"))
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                       "Fotoğraf yok\n\nFotoğrafları veya klasörü buraya sürükleyip bırakabilirsiniz")
+            if self.empty_text:
+                p.setFont(theme.ui_font(14, QFont.Weight.DemiBold))
+                p.setPen(QColor("#C3CDDE"))
+                r = QRectF(self.rect())
+                r.setBottom(r.center().y() + 4)
+                p.drawText(r, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, self.empty_text)
             return
+        # fotoğrafın altına hafif gölge
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        img_rect = QRectF(self.to_widget(0, 0), self.to_widget(self.image.width(), self.image.height()))
+        for k, a in ((10, 18), (5, 30), (2, 45)):
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, a))
+            p.drawRoundedRect(img_rect.adjusted(-k, -k + 4, k, k + 4), k, k)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         self._draw_image(p)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        font = QFont()
-        font.setPointSize(10)
-        font.setBold(True)
+        font = theme.ui_font(12, QFont.Weight.DemiBold)
         p.setFont(font)
         fm = p.fontMetrics()
+        outline = QColor(18, 24, 38, 143)
 
         for i, b in enumerate(self.boxes):
             color = QColor(self.color_fn(b["sinif"]))
-            rect = QRectF(self.to_widget(b["x1"], b["y1"]), self.to_widget(b["x2"], b["y2"]))
-            if i in (self.selected, self.hover):
+            editing = self.edit is not None and self.edit["i"] == i
+            if editing:
+                x1, y1, x2, y2 = self.edit["rect"]
+                rect = QRectF(self.to_widget(x1, y1), self.to_widget(x2, y2)).normalized()
+            else:
+                rect = QRectF(self.to_widget(b["x1"], b["y1"]), self.to_widget(b["x2"], b["y2"])).normalized()
+            selected = i == self.selected or editing
+            width = 3 if selected else 2
+            if i == self.hover or selected:
                 fill = QColor(color)
-                fill.setAlpha(60)
+                fill.setAlpha(26)
                 p.fillRect(rect, fill)
-            p.setPen(QPen(color, 4 if i == self.selected else 2))
+            # ince koyu dış hat: açık / koyu fotoğrafta kutu seçilsin
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(outline, 1))
+            p.drawRect(rect.adjusted(-width / 2 - 0.5, -width / 2 - 0.5, width / 2 + 0.5, width / 2 + 0.5))
+            p.setPen(QPen(color, width))
             p.drawRect(rect)
-            text = box_caption(b)
-            tw, th = fm.horizontalAdvance(text) + 8, fm.height() + 2
-            ty = rect.top() - th if rect.top() - th >= 0 else rect.top()
-            p.fillRect(QRectF(rect.left(), ty, tw, th), color)
-            p.setPen(QColor("white"))
-            p.drawText(QRectF(rect.left() + 4, ty, tw, th), Qt.AlignmentFlag.AlignVCenter, text)
+            if editing:
+                # taşınan kenar(lar) kesikli
+                p.setPen(QPen(QColor(theme.EDIT_EDGE), 3, Qt.PenStyle.DashLine))
+                sides = self.edit["sides"]
+                lines = {"l": (rect.topLeft(), rect.bottomLeft()), "r": (rect.topRight(), rect.bottomRight()),
+                         "t": (rect.topLeft(), rect.topRight()), "b": (rect.bottomLeft(), rect.bottomRight())}
+                for s in sides:
+                    p.drawLine(*lines[s])
+            if selected:
+                for corner in (rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight()):
+                    self._handle(p, corner, 7)
+                if editing:
+                    sides = self.edit["sides"]
+                    cx = rect.left() if "l" in sides else rect.right() if "r" in sides else rect.center().x()
+                    cy = rect.top() if "t" in sides else rect.bottom() if "b" in sides else rect.center().y()
+                    self._handle(p, QPointF(cx, cy), 11)
+            self._draw_label(p, rect, box_label(b), color, fm)
 
         # çizim önizlemesi
         if self.first is not None and self.mouse is not None:
             a = self.to_widget(*self.first)
             b = self.to_widget(*self._clamp(*self.to_image(self.mouse)))
-            p.setPen(QPen(QColor("#ffeb3b"), 2, Qt.PenStyle.DashLine))
-            p.drawRect(QRectF(a, b).normalized())
+            r = QRectF(a, b).normalized()
+            p.setPen(QPen(QColor(22, 32, 52, 168), 1))
+            p.setBrush(QColor(255, 213, 110, 23))
+            p.drawRect(r.adjusted(-1.5, -1.5, 1.5, 1.5))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(theme.DRAFT), 2, Qt.PenStyle.DashLine))
+            p.drawRect(r)
 
         # artı imleç çizgileri (köşeyi tam denk getirmek için)
         if self.mouse is not None and self.pan is None and self._inside(self.mouse):
-            p.setPen(QPen(QColor(255, 255, 255, 160), 1, Qt.PenStyle.DashLine))
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            p.setPen(QPen(QColor(255, 255, 255, 153), 1, Qt.PenStyle.DashLine))
             p.drawLine(QPointF(self.mouse.x(), 0), QPointF(self.mouse.x(), self.height()))
             p.drawLine(QPointF(0, self.mouse.y()), QPointF(self.width(), self.mouse.y()))
+
+        # yakınlaştırma oranı (sağ alt köşe)
+        p.setFont(theme.ui_font(11))
+        p.setPen(QColor("#C3CDDE"))
+        p.drawText(QRectF(0, 0, self.width() - 10, self.height() - 8),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, f"%{round(self.scale * 100)}")

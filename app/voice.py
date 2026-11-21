@@ -502,6 +502,7 @@ class VoiceEngine(QObject):
         self._model = None
         self._model_path = None
         self._thread = None
+        self._old_thread = None
         self._stop = threading.Event()
         self._gen = 0
         self._lock = threading.Lock()
@@ -536,6 +537,20 @@ class VoiceEngine(QObject):
         self._gen += 1                   # eski iş parçacığının sinyalleri yok sayılsın
         if t:
             t.join(timeout=1.0)
+        self._old_thread = t
+
+    def refresh_devices(self):
+        """Sonradan takılan mikrofonlar da listelensin diye ses sürücüsünü yeniden başlatır.
+        Sadece dinleme kapalıyken yapılabilir; yapılamadıysa False döner."""
+        if self.running or (self._old_thread and self._old_thread.is_alive()):
+            return False
+        try:
+            import sounddevice as sd
+            sd._terminate()
+            sd._initialize()
+        except Exception:  # noqa: BLE001
+            return False
+        return True
 
     def set_phrases(self, phrases):
         with self._lock:
@@ -670,12 +685,17 @@ class VoiceEngine(QObject):
         return " ".join(self._alias.get(w, w) for w in text.split() if w != "[unk]")
 
 
+# Windows'un "varsayılanı kullan" girişi; listede zaten "Varsayılan" seçeneği var.
+_MAPPER_NAMES = ("microsoft sound mapper", "microsoft ses eşleştiricisi")
+
+
 def input_devices():
     """[(index, ad)] — varsayılan ses sürücüsündeki mikrofonlar (aynı cihaz birkaç kez listelenmesin)."""
     try:
         import sounddevice as sd
         api = sd.default.hostapi
         return [(i, d["name"]) for i, d in enumerate(sd.query_devices())
-                if d["max_input_channels"] > 0 and d["hostapi"] == api]
+                if d["max_input_channels"] > 0 and d["hostapi"] == api
+                and not d["name"].lower().startswith(_MAPPER_NAMES)]
     except Exception:  # noqa: BLE001
         return []

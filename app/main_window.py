@@ -2,26 +2,27 @@ import copy
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSettings, Qt
-from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QFont, QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QSettings, QSize, Qt
+from PySide6.QtGui import QActionGroup, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QHBoxLayout,
+    QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout,
     QInputDialog, QKeySequenceEdit, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit, QProgressDialog, QPushButton, QSizePolicy, QSplitter, QTextEdit, QToolButton,
+    QPlainTextEdit, QProgressBar, QProgressDialog, QSizePolicy, QSplitter, QTextEdit, QToolButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import shortcuts, theme, voice
+from . import icons, shortcuts, theme, voice
+from . import widgets as W
 from .canvas import Canvas
-from .dialogs import DuplicateDialog, ExportDialog, LabelDialog, SettingsDialog, SetupDialog, color_icon
+from .dialogs import DuplicateDialog, ExportDialog, LabelDialog, SettingsDialog, SetupDialog
 from .exporters import Exporter
-from .image_list import ImageList
-from .imageutil import box_caption, load_image
+from .image_list import ROLE_COUNT, ROLE_PATH, ImageList
+from .imageutil import box_label, load_image
 from .importers import merge_labels, read_cvat
 from .project import IMAGE_EXTS, DuplicateFinder, Project
 from .selection import KeySelector
 
-GREEN = "#2e7d32"
+FILTERS = ["Tüm fotoğraflar", "Etiketlenenler", "Etiket bekleyenler"]
 ROLE_KEY = Qt.ItemDataRole.UserRole + 1     # istatistik satırının altında fotoğraf listesi var: (sinif, attr, secenek)
 ROLE_PHOTO = Qt.ItemDataRole.UserRole + 2   # istatistikte fotoğraf satırı: resim adı
 UNSET = "(seçilmemiş)"
@@ -87,13 +88,28 @@ class MainWindow(QMainWindow):
     #  Arayüz
     # =================================================================
     def _build_ui(self):
-        # ---------- sol: resim listesi ----------
+        # ---------- sol: fotoğraf listesi ----------
         left = QWidget()
+        left.setProperty("surface", "panel")
         ll = QVBoxLayout(left)
-        ll.setContentsMargins(4, 4, 4, 4)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(0)
+        head = QHBoxLayout()
+        head.setContentsMargins(12, 10, 12, 6)
+        head.addWidget(W.label("Fotoğraflar", "panelTitle"))
+        head.addStretch()
+        self.photo_count = W.label("", "count")
+        head.addWidget(self.photo_count)
+        ll.addLayout(head)
         self.filter = QComboBox()
-        self.filter.addItems(["Tüm fotoğraflar", "Etiketlenmemiş", "Etiketlenmiş"])
+        self.filter.setProperty("filter", True)
+        self.filter.addItems(FILTERS)
+        self.filter.setToolTip("Fotoğraf filtresi")
         self.filter.currentIndexChanged.connect(lambda _: self.refresh_image_list())
+        frow = QHBoxLayout()
+        frow.setContentsMargins(10, 0, 10, 6)
+        frow.addWidget(self.filter)
+        ll.addLayout(frow)
         self.image_list = ImageList()
         self.image_list.emptyClicked.connect(self.on_empty_list_click)
         self.image_list.filesDropped.connect(self.handle_drop)
@@ -105,184 +121,376 @@ class MainWindow(QMainWindow):
         # en son soldaki listeye tıklandıysa Del fotoğrafı siler, yoksa kutuyu
         self.list_active = False
         self.image_list.itemPressed.connect(self._on_list_pressed)
-        self.progress_label = QLabel()
-        ll.addWidget(QLabel("<b>Fotoğraflar</b>  <span style='color:gray'>(sağ tık: sil)</span>"))
-        ll.addWidget(self.filter)
-        ll.addWidget(self.image_list)
-        ll.addWidget(self.progress_label)
+        ll.addWidget(self.image_list, 1)
+        foot = QFrame()
+        foot.setProperty("strip", "foot")
+        fl = QVBoxLayout(foot)
+        fl.setContentsMargins(12, 10, 12, 12)
+        fl.setSpacing(7)
+        prow = QHBoxLayout()
+        prow.addWidget(W.label("Etiketlenen", "small"))
+        prow.addStretch()
+        self.progress_label = W.label("", "strong")
+        prow.addWidget(self.progress_label)
+        fl.addLayout(prow)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(False)
+        fl.addWidget(self.progress_bar)
+        ll.addWidget(foot)
 
-        # ---------- orta: üst bar + canvas + alt bar ----------
+        # ---------- orta: gezinme + çizim satırı + tuval ----------
         self.canvas = Canvas(lambda c: self.project.color(c) if self.project else "#fff")
         self.canvas.boxDrawn.connect(self.on_box_drawn)
         self.canvas.boxRightClicked.connect(self.on_box_menu)
+        self.canvas.boxResized.connect(self.on_box_resized)
         self.canvas.pressed.connect(lambda: setattr(self, "list_active", False))
         self.canvas.hint.connect(lambda t: self.hint_label.setText(t))
-        self.canvas.zoomChanged.connect(lambda z: self.zoom_label.setText(f"Zoom: %{z}" if z else ""))
+        self.canvas.emptyAction.connect(self.on_empty_list_click)
 
-        top = QHBoxLayout()
-        self.btn_prev = self._tool_button("◀ Önceki", "Önceki fotoğraf", lambda: self.step(-1))
-        self.btn_next = self._tool_button("Sonraki ▶", "Sonraki fotoğraf", lambda: self.step(1))
-        self.title_label = QLabel()
-        self.title_label.setStyleSheet("font-weight:bold; padding:0 6px;")
-        self.zoom_label = QLabel()
-        self.zoom_label.setStyleSheet("color:gray; padding-right:6px;")
-        self.btn_fit = self._tool_button("⛶ Sığdır", "Fotoğrafı ekrana sığdır", self.canvas.fit)
-        self.btn_del_img = self._tool_button("🗑 Fotoğrafı Sil", "Bu fotoğrafı sil", self.delete_images)
-        self.btn_browse = self._tool_button("", "Etikete göre gezinmeyi bitir (tüm fotoğraflarda gezin)",
-                                            self.end_browse)
-        self.btn_browse.setStyleSheet("QToolButton{background:#1565c0; color:white; font-weight:bold;"
-                                      " border-radius:4px; padding:2px 8px;}")
+        nav = QFrame()
+        nav.setProperty("strip", "nav")
+        top = QHBoxLayout(nav)
+        top.setContentsMargins(10, 6, 10, 6)
+        top.setSpacing(6)
+        self.btn_prev = W.tool_button(icon="chevron-left", tip="Önceki fotoğraf", slot=lambda: self.step(-1),
+                                      outline=True, square=True)
+        self.btn_next = W.tool_button(icon="chevron-right", tip="Sonraki fotoğraf", slot=lambda: self.step(1),
+                                      outline=True, square=True)
+        self.title_label = W.label("", "strong")
+        self.title_label.setMinimumWidth(60)
+        self.pos_label = W.label("", "count")
+        self.btn_browse = W.tool_button("", icon="x", tip="Etiket filtresini kapat (tüm fotoğraflarda gezin)",
+                                        slot=self.end_browse, role="accent_ink")
+        self.btn_browse.setProperty("chip", "filter")
+        self.btn_browse.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.btn_browse.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.btn_browse.setIconSize(QSize(13, 13))
         self.btn_browse.hide()
+        self.btn_fit = W.tool_button(icon="maximize", tip="Fotoğrafı sığdır", slot=self.canvas.fit, square=True)
+        self.btn_del_img = W.tool_button(icon="trash-2", tip="Fotoğrafı sil", slot=self.delete_images, square=True)
         top.addWidget(self.btn_prev)
-        top.addWidget(self.title_label)
         top.addWidget(self.btn_next)
+        top.addSpacing(4)
+        top.addWidget(self.title_label)
+        top.addWidget(self.pos_label)
+        top.addSpacing(6)
         top.addWidget(self.btn_browse)
-        top.addStretch()
-        top.addWidget(self.zoom_label)
+        top.addStretch(1)
         top.addWidget(self.btn_fit)
         top.addWidget(self.btn_del_img)
 
-        bottom = QHBoxLayout()
-        self.active_label = QLabel()
-        self.active_label.setStyleSheet("font-weight:bold;")
-        self.hint_label = QLabel()
-        self.hint_label.setStyleSheet("color:#c77800; font-weight:bold;")
-        bottom.addWidget(self.active_label)
-        bottom.addStretch()
-        bottom.addWidget(self.hint_label)
+        draw = QFrame()
+        draw.setProperty("strip", "draw")
+        dl = QHBoxLayout(draw)
+        dl.setContentsMargins(10, 6, 10, 6)
+        dl.setSpacing(8)
+        mode = W.tool_button("Kutu çiz", icon="square-dashed",
+                             tip="İki tıkla kutu çiz: önce sol üst, sonra sağ alt köşe")
+        mode.setProperty("chip", "info")
+        mode.setIconSize(QSize(15, 15))
+        mode.setCursor(Qt.CursorShape.ArrowCursor)
+        mode.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.pill = QFrame()
+        self.pill.setProperty("pill", "empty")
+        pl = QHBoxLayout(self.pill)
+        pl.setContentsMargins(7, 3, 8, 3)
+        pl.setSpacing(6)
+        self.pill_dot = W.dot_label("#888888", 8)
+        self.pill_text = QLabel()
+        pl.addWidget(self.pill_dot)
+        pl.addWidget(self.pill_text)
+        self.btn_clear_sel = W.tool_button(icon="x", tip="Aktif etiketi sıfırla",
+                                           slot=lambda: self.project and self.clear_selection(), role="dim")
+        self.btn_clear_sel.setFixedSize(24, 24)
+        self.btn_clear_sel.setIconSize(QSize(14, 14))
+        self.options_label = W.label("", "small")
+        self.hint_label = W.label("", "small")
+        dl.addWidget(mode)
+        dl.addWidget(self.pill)
+        dl.addWidget(self.btn_clear_sel)
+        dl.addWidget(self.options_label)
+        dl.addWidget(self.hint_label)
+        dl.addStretch()
 
         center = QWidget()
         cl = QVBoxLayout(center)
-        cl.setContentsMargins(0, 4, 0, 4)
-        cl.addLayout(top)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(0)
+        cl.addWidget(nav)
+        cl.addWidget(draw)
         cl.addWidget(self.canvas, 1)
-        cl.addLayout(bottom)
 
         # ---------- sağ: kutular + istatistik ----------
         right = QWidget()
+        right.setProperty("surface", "panel")
         rl = QVBoxLayout(right)
-        rl.setContentsMargins(4, 4, 4, 4)
-        rl.addWidget(QLabel("<b>Bu fotoğraftaki kutular</b>"))
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(0)
+        bhead = QHBoxLayout()
+        bhead.setContentsMargins(12, 10, 12, 6)
+        bhead.addWidget(W.label("Bu fotoğraftaki kutular", "panelTitle"))
+        bhead.addStretch()
+        self.box_count = W.label("", "count")
+        bhead.addWidget(self.box_count)
+        rl.addLayout(bhead)
         self.box_list = QListWidget()
         self.box_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.box_list.setIconSize(QSize(10, 10))
+        self.box_list.setStyleSheet("QListView { margin: 0 7px; } QListView::item { padding: 5px 6px; }")
+        self.box_list.setFont(theme.ui_font(13, QFont.Weight.DemiBold))
+        self.box_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.box_list.currentRowChanged.connect(self.canvas.set_selected)
+        self.box_list.currentRowChanged.connect(lambda _: self._update_box_buttons())
         self.box_list.itemPressed.connect(lambda _: setattr(self, "list_active", False))
         self.box_list.itemDoubleClicked.connect(lambda _: self.edit_box(self.box_list.currentRow()))
+        self.box_empty = W.label("Bu fotoğrafta henüz kutu yok.", "muted", wrap=True)
+        self.box_empty.setContentsMargins(12, 4, 12, 4)
+        self.box_empty.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         brow = QHBoxLayout()
-        b_edit = QPushButton("Düzenle")
-        b_del = QPushButton("Kutuyu Sil")
-        b_edit.clicked.connect(lambda: self.edit_box(self.box_list.currentRow()))
-        b_del.clicked.connect(lambda: self.delete_box(self.box_list.currentRow()))
-        brow.addWidget(b_edit)
-        brow.addWidget(b_del)
-        rl.addWidget(self.box_list, 1)
+        brow.setContentsMargins(10, 8, 10, 11)
+        brow.setSpacing(5)
+        self.b_edit_box = W.tool_button("Düzenle", icon="pencil", tip="Seçili kutunun etiketini düzenle",
+                                        slot=lambda: self.edit_box(self.box_list.currentRow()), outline=True)
+        self.b_del_box = W.tool_button(icon="trash-2", tip="Kutuyu sil",
+                                       slot=lambda: self.delete_box(self.box_list.currentRow()), square=True)
+        for b in (self.b_edit_box, self.b_del_box):
+            b.setIconSize(QSize(15, 15))
+        brow.addWidget(self.b_edit_box)
+        brow.addWidget(self.b_del_box)
+        brow.addStretch()
+        rl.addWidget(self.box_list)
+        rl.addWidget(self.box_empty)
         rl.addLayout(brow)
+        rl.addWidget(W.hline())
 
-        rl.addWidget(QLabel("<b>İstatistik</b>  <span style='color:gray'>(tıkla = aktif yap)</span>"))
-        self.stats_summary = QLabel()
+        shead = QHBoxLayout()
+        shead.setContentsMargins(12, 10, 8, 2)
+        shead.addWidget(W.label("Proje istatistiği", "panelTitle"))
+        shead.addStretch()
+        stats_icon = W.tool_button(icon="list-tree", role="dim", square=True)
+        stats_icon.setToolTip("Satıra tıkla: aktif etiket yap.\nSoldaki oka tıkla: o etiketli fotoğraflar.")
+        stats_icon.setCursor(Qt.CursorShape.WhatsThisCursor)
+        shead.addWidget(stats_icon)
+        rl.addLayout(shead)
+        self.stats_summary = W.label("", "small")
+        self.stats_summary.setContentsMargins(12, 0, 12, 6)
+        rl.addWidget(self.stats_summary)
         self.stats_tree = QTreeWidget()
-        self.stats_tree.setHeaderLabels(["", "Adet"])
-        self.stats_tree.setColumnWidth(0, 230)
+        self.stats_tree.setHeaderHidden(True)
+        self.stats_tree.setColumnCount(1)
+        self.stats_tree.setIndentation(14)
         self.stats_tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.stats_tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.stats_tree.setMouseTracking(True)
+        self.stats_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.stats_tree.setItemDelegate(W.StatsDelegate(self.stats_tree))
+        self.stats_tree.setStyleSheet("QTreeView { margin-left: 4px; }")
         self.stats_tree.itemClicked.connect(self._on_stats_clicked)
         self.stats_tree.itemExpanded.connect(self._on_stats_expanded)
         self.stats_tree.itemCollapsed.connect(self._on_stats_collapsed)
-        rl.addWidget(self.stats_summary)
         rl.addWidget(self.stats_tree, 2)
 
         split = QSplitter()
+        split.setHandleWidth(1)
+        split.setChildrenCollapsible(False)
         split.addWidget(left)
         split.addWidget(center)
         split.addWidget(right)
-        split.setSizes([230, 880, 320])
+        left.setMinimumWidth(190)
+        right.setMinimumWidth(240)
+        split.setSizes([232, 880, 300])
+        split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
+        split.setStretchFactor(2, 0)
         self.setCentralWidget(split)
 
-    def _tool_button(self, text, tip, slot):
-        b = QToolButton()
-        b.setText(text)
-        b.setToolTip(tip)
-        b.setAutoRaise(False)
-        b.clicked.connect(slot)
-        b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        return b
+        # ---------- alt durum çubuğu ----------
+        sb = self.statusBar()
+        sb.setSizeGripEnabled(False)
+        self.status_default = QLabel("İki tıkla kutu çiz")
+        self.status_default.setContentsMargins(6, 0, 0, 0)
+        sb.addWidget(self.status_default, 1)
+        self.status_keys = QWidget()
+        self.status_keys_lay = QHBoxLayout(self.status_keys)
+        self.status_keys_lay.setContentsMargins(0, 0, 8, 0)
+        self.status_keys_lay.setSpacing(4)
+        sb.addPermanentWidget(self.status_keys)
+        self.save_label = QLabel()
+        self.save_label.setContentsMargins(0, 0, 8, 0)
+        sb.addPermanentWidget(self.save_label)
+        self._set_save_state(True)
+        theme.notifier().changed.connect(self._on_theme_changed)
+
+    def _set_save_state(self, ok, err=""):
+        self.save_ok = ok
+        self.save_label.setProperty("role", "saved" if ok else "saveError")
+        self.save_label.setText("✓ Otomatik kayıt" if ok else "⚠ Kayıt başarısız")
+        self.save_label.setToolTip("Her değişiklik anında diske yazılır." if ok
+                                   else f"Son değişiklik diske yazılamadı:\n{err}\n\n"
+                                        "Klasöre erişimi / disk alanını kontrol edip işlemi tekrarlayın.")
+        theme.repolish(self.save_label)
+
+    def _update_status_keys(self, g):
+        lay = self.status_keys_lay
+        while lay.count():
+            w = lay.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        groups = [([g["onceki"], g["sonraki"]], "Gezin"), ([g["sigdir"]], "Sığdır"), ([g["geri_al"]], "Geri al")]
+        for keys, text in groups:
+            keys = [k for k in keys if k]
+            if not keys:
+                continue
+            for k in keys:
+                lay.addWidget(W.kbd(k))
+            lay.addWidget(QLabel(text))
+            lay.addSpacing(6)
+
+    def _on_theme_changed(self):
+        self._show_theme(self.settings.value("tema", "sistem"))
+        self._update_active_label()
+        self.stats_tree.viewport().update()
 
     def _build_toolbar(self):
         tb = self.addToolBar("Araçlar")
         tb.setMovable(False)
+        tb.setFloatable(False)
+        tb.toggleViewAction().setEnabled(False)
+        tb.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
+        tb.setIconSize(QSize(17, 17))
 
-        def act(text, slot):
-            a = QAction(text, self)
-            a.triggered.connect(slot)
-            tb.addAction(a)
-            return a
+        # ---------- proje ----------
+        self.project_btn = QToolButton()
+        self.project_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.project_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.project_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        pl = QHBoxLayout(self.project_btn)
+        pl.setContentsMargins(8, 2, 8, 2)
+        pl.setSpacing(8)
+        self.project_icon = QLabel()
+        texts = QVBoxLayout()
+        texts.setSpacing(0)
+        self.project_name = W.label("", "strong")
+        self.project_sub = W.label("", "small")
+        texts.addWidget(self.project_name)
+        texts.addWidget(self.project_sub)
+        self.project_chev = QLabel()
+        pl.addWidget(self.project_icon)
+        pl.addLayout(texts)
+        pl.addWidget(self.project_chev)
+        for w in (self.project_icon, self.project_name, self.project_sub, self.project_chev):
+            w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        pm = QMenu(self.project_btn)
+        a = pm.addAction("Proje aç / oluştur…", self.choose_project)
+        W.set_icon(a, "folder-open")
+        pm.addSeparator()
+        self.a_refresh = pm.addAction("Yenile", self.reload_project)
+        W.set_icon(self.a_refresh, "refresh-cw")
+        self.a_open_dir = pm.addAction("Klasörü göster", self.show_folder)
+        W.set_icon(self.a_open_dir, "folder-open")
+        self.project_btn.setMenu(pm)
+        tb.addWidget(self.project_btn)
+        tb.addSeparator()
 
-        act("📁 Proje Klasörü Aç / Oluştur", self.choose_project)
-        tb.addSeparator()
-        self.a_setup = act("🏷 Sınıfları Düzenle", self.open_setup)
-        self.a_add = act("➕ Fotoğraf Ekle", self.add_images)
-        self.a_add_dir = act("➕ Klasörden Ekle", self.add_image_folder)
-        self.a_refresh = act("🔄 Yenile", self.reload_project)
-        tb.addSeparator()
-        self.a_import = act("📥 CVAT XML İçe Aktar", self.import_cvat)
-        self.a_export = act("📤 Dışa Aktar", self.export)
-        self.a_open_dir = act("📂 Klasörü Göster", self.show_folder)
-        tb.addSeparator()
-        self.a_settings = act("⚙ Ayarlar", lambda: self.open_settings())
+        # ---------- fotoğraf / sınıf / içe aktar ----------
+        self.btn_add = W.tool_button("Fotoğraf ekle", icon="image-plus", tip="Fotoğraf ekle (dosya seç)",
+                                     slot=self.add_images, outline=True)
+        self.btn_add.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.btn_add.setProperty("split", True)
+        am = QMenu(self.btn_add)
+        a = am.addAction("Dosya seç…", self.add_images)
+        W.set_icon(a, "image-plus")
+        a = am.addAction("Klasörden ekle…", self.add_image_folder)
+        W.set_icon(a, "folder-plus")
+        self.btn_add.setMenu(am)
+        self.btn_setup = W.tool_button("Sınıflar", icon="tags", tip="Sınıfları düzenle", slot=self.open_setup)
+        self.btn_import = W.tool_button("İçe aktar", icon="upload", tip="CVAT XML içe aktar",
+                                        slot=lambda: self.import_cvat())
+        for b in (self.btn_add, self.btn_setup, self.btn_import):
+            tb.addWidget(b)
 
-        # ---------- sağ üst: mikrofon + tema seçimi ----------
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tb.addWidget(spacer)
-        self.mic_btn = QToolButton()
+
+        # ---------- mikrofon / tema / ayarlar / dışa aktar ----------
+        self.mic_btn = W.tool_button("Kapalı", icon="mic-off", slot=self.toggle_voice, role="dim")
         self.mic_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        self.mic_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.mic_btn.clicked.connect(self.toggle_voice)
+        self.mic_btn.setProperty("split", True)
         mic_menu = QMenu(self.mic_btn)
         mic_menu.aboutToShow.connect(lambda: self._fill_mic_menu(mic_menu))
         self.mic_btn.setMenu(mic_menu)
         tb.addWidget(self.mic_btn)
-        gap = QWidget()
-        gap.setFixedWidth(6)
-        tb.addWidget(gap)
+
         current = self.settings.value("tema", "sistem")
-        self.theme_btn = QToolButton()
+        self.theme_btn = W.tool_button(icon="monitor", square=True)
         self.theme_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.theme_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.theme_btn.setStyleSheet("QToolButton { font-size: 15px; padding: 0 6px; }"
-                                     "QToolButton::menu-indicator { image: none; width: 0; }")
         menu = QMenu(self.theme_btn)
         group = QActionGroup(self)
-        for key, icon, name in theme.MODES:
-            a = menu.addAction(f"{icon}  {name}")
+        for key, icon_name, name in theme.MODES:
+            a = menu.addAction(name)
+            W.set_icon(a, icon_name)
             a.setCheckable(True)
             a.setChecked(key == current)
             a.triggered.connect(lambda _=False, k=key: self.set_theme(k))
             group.addAction(a)
         self.theme_btn.setMenu(menu)
         tb.addWidget(self.theme_btn)
+
+        self.btn_settings = W.tool_button(icon="settings", tip="Ayarlar", slot=lambda: self.open_settings(),
+                                          square=True)
+        tb.addWidget(self.btn_settings)
+        self.btn_export = W.tool_button("Dışa aktar", icon="download", tip="Dışa aktar", slot=self.export,
+                                        primary=True)
+        tb.addWidget(self.btn_export)
         self._show_theme(current)
 
+    def _update_project_button(self):
+        self.project_icon.setPixmap(icons.icon("folder-open", theme.c("accent_ink")).pixmap(18, 18))
+        self.project_chev.setPixmap(icons.icon("chevron-down", theme.c("dim")).pixmap(14, 14))
+        if self.project:
+            self.project_name.setText(self.project.name)
+            parent = self.project.root.parent
+            self.project_sub.setText(parent.name or str(parent))
+            self.project_btn.setToolTip(f"{self.project.root}\n\nProje aç / oluştur, yenile, klasörü göster")
+        else:
+            self.project_name.setText("Proje aç")
+            self.project_sub.setText("klasör seçilmedi")
+            self.project_btn.setToolTip("Proje klasörü aç / oluştur")
+        fm_name = self.project_name.fontMetrics()
+        fm_sub = self.project_sub.fontMetrics()
+        text_w = max(fm_name.horizontalAdvance(self.project_name.text()) + 8,
+                     fm_sub.horizontalAdvance(self.project_sub.text()) + 8)
+        self.project_btn.setFixedWidth(min(text_w, 260) + 18 + 14 + 16 + 16)
+        self.project_btn.setMinimumHeight(38)
+
     def _show_theme(self, key):
-        _, icon, name = next((m for m in theme.MODES if m[0] == key), theme.MODES[0])
-        self.theme_btn.setText(icon)
+        _, icon_name, name = next((m for m in theme.MODES if m[0] == key), theme.MODES[0])
+        W.set_icon(self.theme_btn, icon_name)
         self.theme_btn.setToolTip(f"Tema: {name}  (değiştirmek için tıklayın)")
+        self._update_project_button()
 
     def set_theme(self, key):
-        theme.apply(key)
         self.settings.setValue("tema", key)
-        self._show_theme(key)
+        theme.apply(key)
 
     def _update_enabled(self):
         on = self.project is not None
-        for w in (self.a_setup, self.a_add, self.a_add_dir, self.a_refresh, self.a_import,
-                  self.a_export, self.a_open_dir, self.a_settings, self.btn_fit, self.btn_del_img,
+        for w in (self.btn_setup, self.btn_add, self.a_refresh, self.btn_import, self.btn_export,
+                  self.a_open_dir, self.btn_settings, self.btn_fit, self.btn_del_img,
                   self.btn_prev, self.btn_next, self.mic_btn):
             w.setEnabled(on)
+        self._update_project_button()
         if not on:
-            self.title_label.setText("Başlamak için üstten 'Proje Klasörü Aç / Oluştur'a tıklayın.")
-            self.image_list.placeholder = "📁\n\nÖnce proje klasörü açın\n\n(buraya tıklayın)"
+            self.title_label.setText("Proje açık değil")
+            self.pos_label.setText("")
+            self.photo_count.setText("")
+            self.progress_label.setText("–")
+            self.progress_bar.setValue(0)
+            self.image_list.placeholder = "Önce proje aç / oluştur"
             self.image_list.viewport().update()
+            self.canvas.set_empty("Proje açık değil", "Proje aç / oluştur")
+            self.refresh_box_list()
 
     # =================================================================
     #  Kısayollar
@@ -323,13 +531,13 @@ class MainWindow(QMainWindow):
                 bind(key, lambda k=key: self.on_label_key(k))
 
         tips = {"onceki": self.btn_prev, "sonraki": self.btn_next, "sigdir": self.btn_fit,
-                "foto_sil": self.btn_del_img}
+                "foto_sil": self.btn_del_img, "kutu_sil": self.b_del_box, "sifirla": self.btn_clear_sel,
+                "disa_aktar": self.btn_export}
         for k, btn in tips.items():
             base = btn.toolTip().split("  (")[0]
             btn.setToolTip(base + (f"  ({g[k]})" if g[k] else ""))
-        self.statusBar().showMessage(
-            f"Sol üst köşeye tıkla → sağ alt köşeye tıkla → seç.  Tekerlek: zoom.  "
-            f"Sağ tık basılı sürükle: gezin.  {g['geri_al']}: geri al.  {g['sigdir']}: sığdır.")
+        self.a_refresh.setText("Yenile" + (f"\t{g['yenile']}" if g["yenile"] else ""))
+        self._update_status_keys(g)
 
         # sesle seçim: bas-konuş tuşu QShortcut değil (basılı tutma / bırakma gerekiyor), eventFilter'da
         self.ptt_key = g["ses_baskonus"]
@@ -365,40 +573,47 @@ class MainWindow(QMainWindow):
         self.refresh_stats()
 
     def _update_active_label(self):
+        """Çizim satırındaki aktif etiket rozeti: Hazır / ... seç / Etiket seçilmedi."""
         sel = self.sel
-        reset_key = shortcuts.load_general(self.settings)["sifirla"]
-        reset = f"   ({reset_key}: sıfırla)" if reset_key else ""
         if not self.project or not sel or not sel.cls:
-            self.active_label.setStyleSheet("color:gray;")
-            self.active_label.setText("Seçim yok — kutu çizince menü açılır.   (sınıf tuşuna basarak seçebilirsiniz)")
+            W.prop(self.pill, "pill", "empty")
+            self.pill_dot.hide()
+            self.pill_text.setText("Etiket seçilmedi")
+            self.pill.setToolTip("Kutu çizince etiket penceresi açılır. Sınıf tuşuna basarak "
+                                 "önceden seçebilirsin.")
+            self.btn_clear_sel.hide()
+            self.options_label.hide()
             return
-        color = self.project.color(sel.cls)
-        chosen = " → ".join([sel.cls] + list(sel.attrs.values()))
+        self.pill_dot.setPixmap(W.dot_pixmap(self.project.color(sel.cls), 8, 2))
+        self.pill_dot.show()
+        self.btn_clear_sel.show()
+        chosen = " › ".join([sel.cls] + list(sel.attrs.values()))
         if sel.complete():
-            self.active_label.setStyleSheet(
-                "background:#1b5e20; color:white; font-weight:bold; padding:3px 8px; border-radius:4px;")
-            self.active_label.setText(f"<span style='color:{color}'>■</span> {chosen}   ✔ HAZIR — kutular "
-                                      f"menü açılmadan böyle etiketlenecek{reset}")
+            W.prop(self.pill, "pill", "ready")
+            self.pill_text.setText(f"{chosen} · Hazır")
+            self.pill.setToolTip("Kutular etiket penceresi açılmadan bu etiketle kaydedilir.")
+            self.options_label.hide()
         else:
-            self.active_label.setStyleSheet(
-                "background:#5d4300; color:white; font-weight:bold; padding:3px 8px; border-radius:4px;")
-            self.active_label.setText(f"<span style='color:{color}'>■</span> {chosen} → <u>{sel.pending}</u>?   "
-                                      f"{sel.options_hint()}{reset}")
+            W.prop(self.pill, "pill", "partial")
+            self.pill_text.setText(f"{chosen} · {sel.pending} seç")
+            self.pill.setToolTip(f"Sıradaki: {sel.pending}. Tuşuna bas ya da kutuyu çiz, pencerede seç.")
+            self.options_label.setText(sel.options_hint())
+            self.options_label.setVisible(bool(sel.options_hint()))
 
     def open_settings(self, tab=0):
-        if SettingsDialog(self.project, self.settings, self, tab=tab).exec():
+        dlg = SettingsDialog(self.project, self.settings, self, tab=tab,
+                             refresh_devices=self.refresh_voice_devices if self.voice else None)
+        if dlg.exec():
             self.apply_shortcuts()
             self.sel.validate()
             self._selection_changed()
             self.set_voice_mode(self.settings.value("ses/mod", "baskonus"))
+            if dlg.device_name != self.settings.value("ses/cihaz", ""):
+                self.set_voice_device(dlg.device_name)
 
     # =================================================================
     #  Sesle seçim ("mercimek çorbası" → corba → mercimek)
     # =================================================================
-    _MIC_STYLE = ("QToolButton {{ font-size: 14px; font-weight: bold; padding: 2px 6px; border-radius: 4px;"
-                  " border: 1px solid {border}; background: {bg}; {color} }}"
-                  "QToolButton::menu-button {{ border: none; width: 16px; }}")
-
     def _voice_update_button(self):
         if not hasattr(self, "mic_btn"):
             return
@@ -406,29 +621,29 @@ class MainWindow(QMainWindow):
         mute = f" ({mute_key})" if mute_key else ""
         on = bool(self.voice and self.voice.running)
         if not self.voice:
-            look = ("🎤", "#808080", "transparent", "color: gray;")
+            state, icon, role, text = "none", "mic-off", "disabled", "Kullanılamıyor"
             tip = "Sesle seçim için kütüphane eksik:\npip install " + " ".join(self.voice_missing)
         elif not on:
-            look = ("🔇 Kapalı", "#c62828", "rgba(198,40,40,0.18)", "color: #e53935;")
-            tip = f"Mikrofon kapalı. Açmak için tıkla{mute}.\nOk: dinleme şekli, mikrofon seçimi"
+            state, icon, role, text = "off", "mic-off", "dim", "Kapalı"
+            tip = f"Mikrofon kapalı. Açmak için tıkla{mute}.\nYanındaki ok: dinleme şekli, mikrofon seçimi"
         elif self.voice_state == "yukleniyor":
-            look = ("⏳ Hazırlanıyor", "#c77800", "rgba(199,120,0,0.18)", "")
+            state, icon, role, text = "wait", "mic", "warn", "Hazırlanıyor…"
             tip = "Ses modeli yükleniyor…"
         elif self.ptt_held or (self.voice_mode == "surekli" and self.voice_speaking):
-            look = ("🎤 Dinliyor", "#1b5e20", "#2e7d32", "color: white;")
+            state, icon, role, text = "live", "mic", "good", "Dinliyor"
             tip = "Konuşuyorsun — söylediğin sınıf / seçenek seçilecek"
         elif self.voice_mode == "surekli":
-            look = ("🎤 Sürekli", "#2e7d32", "rgba(46,125,50,0.18)", "")
+            state, icon, role, text = "on", "mic", "good", "Sürekli"
             tip = f"Sürekli dinliyor. Sınıfı / seçeneği söylemen yeter.\nKapatmak (sessize almak) için tıkla{mute}."
         else:
             k = self.ptt_key or "tuş atanmamış"
-            look = (f"🎤 Bas-konuş ({k})", "#808080", "transparent", "")
+            state, icon, role, text = "ptt", "mic", "ink", f"Bas-konuş ({k})"
             tip = (f"{k} tuşunu basılı tutarken söyle, bırakınca seçilir.\n"
                    f"Kapatmak (sessize almak) için tıkla{mute}.")
-        text, border, bg, color = look
         self.mic_btn.setText(text)
         self.mic_btn.setToolTip(tip)
-        self.mic_btn.setStyleSheet(self._MIC_STYLE.format(border=border, bg=bg, color=color))
+        W.set_icon(self.mic_btn, icon, role)
+        W.prop(self.mic_btn, "mic", state)
 
     def _fill_mic_menu(self, menu):
         menu.clear()
@@ -450,15 +665,20 @@ class MainWindow(QMainWindow):
             a.triggered.connect(lambda _=False, k=key: self.set_voice_mode(k))
             group.addAction(a)
         menu.addSeparator()
-        dev_menu = menu.addMenu("Mikrofon seç")
-        dev_group = QActionGroup(dev_menu)
         current = self.settings.value("ses/cihaz", "")
-        for _idx, name in [(None, "")] + voice.input_devices():
+        devices = [n for _i, n in voice.input_devices()]
+        shown = current if current in devices else "Varsayılan"
+        dev_menu = menu.addMenu(f"🎙 Mikrofon: {shown}")
+        dev_group = QActionGroup(dev_menu)
+        for name in [""] + devices:
             a = dev_menu.addAction(name or "Varsayılan (Windows ayarı)")
             a.setCheckable(True)
-            a.setChecked(name == current)
+            a.setChecked(name == (current if current in devices else ""))
             a.triggered.connect(lambda _=False, n=name: self.set_voice_device(n))
             dev_group.addAction(a)
+        dev_menu.addSeparator()
+        dev_menu.addAction("🔄 Listeyi yenile (yeni taktığın mikrofon yoksa)").triggered.connect(
+            self.refresh_voice_devices)
         menu.addSeparator()
         a = menu.addAction(f"Son duyulanı öğret: “{self.last_heard}”…" if self.last_heard
                            else "Son duyulanı öğret… (henüz bir şey duyulmadı)")
@@ -514,6 +734,21 @@ class MainWindow(QMainWindow):
         if self.voice and self.voice.running:
             self._voice_stop()
             self._voice_start(ask=False)
+        self.statusBar().showMessage(f"🎙 Mikrofon: {name or 'Varsayılan (Windows ayarı)'}", 3000)
+
+    def refresh_voice_devices(self):
+        """Sonradan takılan mikrofonlar görünsün; dinleme açıksa kısa süre kapatılıp yeniden açılır."""
+        if not self.voice:
+            return
+        was_on = self.voice.running
+        if was_on:
+            self._voice_stop()
+        ok = self.voice.refresh_devices()
+        if was_on:
+            self._voice_start(ask=False)
+        n = len(voice.input_devices())
+        self.statusBar().showMessage(f"🔄 Mikrofon listesi yenilendi: {n} mikrofon bulundu." if ok
+                                     else "Mikrofon listesi şu an yenilenemedi, birazdan tekrar dene.", 3500)
 
     def set_voice_mode(self, mode):
         if mode not in dict(voice.MODES):
@@ -751,8 +986,8 @@ class MainWindow(QMainWindow):
         self._update_active_label()
         if not self.project.classes:
             QMessageBox.information(self, "Hoş geldiniz",
-                                    "Önce sınıfları tanımlayalım (ör. corba → corba_turu → mercimek, ezogelin).\n\n"
-                                    "Elinizde CVAT XML dosyası varsa 'CVAT XML İçe Aktar' ile de doldurabilirsiniz.")
+                                    "Önce sınıfları tanımlayalım (ör. corba → tur → mercimek, ezogelin).\n\n"
+                                    "Elinizde CVAT XML dosyası varsa üstteki 'İçe aktar' ile de doldurabilirsiniz.")
             self.open_setup()
 
     def reload_project(self):
@@ -901,17 +1136,22 @@ class MainWindow(QMainWindow):
         for name in self.images:
             n = len(self.project.get_boxes(name))
             labeled += n > 0
-            if (mode == 1 and n) or (mode == 2 and not n):
+            if (mode == 1 and not n) or (mode == 2 and n):
                 continue
-            it = QListWidgetItem()
+            it = QListWidgetItem(name)
             it.setData(Qt.ItemDataRole.UserRole, name)
-            self._style_item(it, name, n)
+            it.setData(ROLE_PATH, str(self.project.image_path(name)))
+            it.setToolTip(name)
+            it.setData(ROLE_COUNT, n)
             self.image_list.addItem(it)
         self.image_list.blockSignals(False)
-        self.progress_label.setText(f"Etiketlenen: <b>{labeled}</b> / {len(self.images)} fotoğraf")
-        self.image_list.placeholder = (
-            "" if not self.images else "Bu filtrede fotoğraf yok\n\n(eklemek için tıklayın\nveya sürükleyin)")
+        self._update_progress(labeled)
+        self.image_list.placeholder = "Fotoğraf ekle veya bırak" if not self.images else "Bu filtrede fotoğraf yok"
         self.image_list.viewport().update()
+        if self.images:
+            self.canvas.set_empty("Bu filtrede fotoğraf yok")
+        else:
+            self.canvas.set_empty("Henüz fotoğraf eklenmedi", "Fotoğraf ekle")
 
         row = next((i for i in range(self.image_list.count())
                     if self.image_list.item(i).data(Qt.ItemDataRole.UserRole) == select), None)
@@ -924,16 +1164,20 @@ class MainWindow(QMainWindow):
             self.current_image = None
             self.boxes = []
             self.canvas.set_image(None, [])
-            self.title_label.setText("Fotoğraf yok — 'Fotoğraf Ekle' ya da sürükleyip bırakın.")
+            self.title_label.setText("Fotoğraf yok" if not self.images else "Bu filtrede fotoğraf yok")
+            self.pos_label.setText("")
+            self.btn_prev.setEnabled(False)
+            self.btn_next.setEnabled(False)
             self.refresh_box_list()
 
-    @staticmethod
-    def _style_item(it, name, n):
-        it.setText(f"✔ {name}  ({n})" if n else f"     {name}")
-        if n:
-            it.setForeground(QBrush(QColor(GREEN)))
-        else:
-            it.setData(Qt.ItemDataRole.ForegroundRole, None)
+    def _update_progress(self, labeled=None):
+        if labeled is None:
+            labeled = sum(1 for i in self.images if self.project.get_boxes(i))
+        total = len(self.images)
+        self.photo_count.setText(str(total))
+        self.progress_label.setText(f"{labeled} / {total}")
+        self.progress_bar.setMaximum(max(1, total))
+        self.progress_bar.setValue(labeled)
 
     def _on_image_selected(self, item, _prev=None):
         if item is None:
@@ -958,12 +1202,22 @@ class MainWindow(QMainWindow):
         name = self.current
         if not name:
             return
-        idx = self.images.index(name) + 1 if name in self.images else 0
-        self.title_label.setText(f"{name}   ({idx}/{len(self.images)})")
+        fm = self.title_label.fontMetrics()
+        self.title_label.setText(fm.elidedText(name, Qt.TextElideMode.ElideMiddle, 320))
+        self.title_label.setToolTip(name)
         if self.browse:
+            # etikete göre gezinme: sıra o etiketli fotoğraflar içinde
             names = [n for n, _ in self._photos_for(self.browse)]
-            pos = f"{names.index(name) + 1}/{len(names)}" if name in names else f"–/{len(names)}"
-            self.btn_browse.setText(f"🔎 {self._browse_label(self.browse)}  {pos}   ✕")
+            i = names.index(name) if name in names else -1
+            self.pos_label.setText(f"{i + 1} / {len(names)}" if i >= 0 else f"– / {len(names)}")
+            self.btn_browse.setText(f"{self._browse_label(self.browse)} filtresi")
+            self.btn_prev.setEnabled(bool(names))
+            self.btn_next.setEnabled(bool(names))
+        else:
+            row = self.image_list.currentRow()
+            self.pos_label.setText(f"{row + 1} / {self.image_list.count()}")
+            self.btn_prev.setEnabled(row > 0)
+            self.btn_next.setEnabled(row < self.image_list.count() - 1)
 
     def step(self, d):
         if self.browse:
@@ -1036,8 +1290,15 @@ class MainWindow(QMainWindow):
     # =================================================================
     def _save(self):
         """Aktif fotoğrafın kutularını diske yazar (otomatik kayıt)."""
-        self.project.set_boxes(self.current, self.current_image.width(),
-                               self.current_image.height(), copy.deepcopy(self.boxes))
+        try:
+            self.project.set_boxes(self.current, self.current_image.width(),
+                                   self.current_image.height(), copy.deepcopy(self.boxes))
+        except OSError as e:
+            self._set_save_state(False, str(e))
+            self.statusBar().showMessage(f"Kayıt başarısız: {e}", 8000)
+        else:
+            if not self.save_ok:
+                self._set_save_state(True)
         self.canvas.set_boxes(self.boxes)
         self.refresh_box_list()
         self._refresh_current_list_item()
@@ -1070,7 +1331,7 @@ class MainWindow(QMainWindow):
             self.current_image = None
             self.refresh_image_list(select=u["resim"])
         self.refresh_stats()
-        self.statusBar().showMessage("Geri alındı.", 3000)
+        self.statusBar().showMessage("İşlem geri alındı.", 3000)
 
     def _ask_label(self, current=None):
         if not self.project.classes:
@@ -1109,7 +1370,20 @@ class MainWindow(QMainWindow):
         self.boxes.append({"sinif": cls, "x1": round(x1, 2), "y1": round(y1, 2),
                            "x2": round(x2, 2), "y2": round(y2, 2), "attributeler": attrs})
         self._save()
-        self.statusBar().showMessage(f"Kaydedildi: {box_caption(self.boxes[-1])}", 3000)
+        self.statusBar().showMessage(f"Kutu eklendi: {box_label(self.boxes[-1])}", 3000)
+
+    def on_box_resized(self, i, x1, y1, x2, y2):
+        """Kutunun kenarı / köşesi taşındı: etiketi aynı kalır, sadece yeri değişir."""
+        if self.current is None or not (0 <= i < len(self.boxes)):
+            return
+        self._push_box_undo()
+        b = self.boxes[i]
+        b["x1"], b["y1"], b["x2"], b["y2"] = (round(v, 2) for v in (x1, y1, x2, y2))
+        self._save()
+        self.box_list.setCurrentRow(i)
+        key = shortcuts.load_general(self.settings)["geri_al"]
+        self.statusBar().showMessage(f"Kutu kenarı güncellendi: {box_label(b)}"
+                                     + (f"  ({key}: geri al)" if key else ""), 3000)
 
     def edit_box(self, i):
         if not (0 <= i < len(self.boxes)):
@@ -1138,8 +1412,10 @@ class MainWindow(QMainWindow):
     def on_box_menu(self, i, pos):
         self.box_list.setCurrentRow(i)
         m = QMenu(self)
-        a_edit = m.addAction("Düzenle (sınıf / attribute değiştir)")
+        a_edit = m.addAction("Etiketi düzenle")
+        W.set_icon(a_edit, "pencil")
         a_del = m.addAction("Kutuyu sil")
+        W.set_icon(a_del, "trash-2")
         chosen = m.exec(pos)
         if chosen == a_edit:
             self.edit_box(i)
@@ -1149,17 +1425,32 @@ class MainWindow(QMainWindow):
     def refresh_box_list(self):
         self.box_list.blockSignals(True)
         self.box_list.clear()
-        for b in self.boxes:
-            self.box_list.addItem(QListWidgetItem(color_icon(self.project.color(b["sinif"])), box_caption(b)))
+        for b in self.boxes if self.project else []:
+            it = QListWidgetItem(W.dot_icon(self.project.color(b["sinif"])), box_label(b))
+            it.setToolTip(box_label(b))
+            self.box_list.addItem(it)
         self.box_list.blockSignals(False)
         self.canvas.set_selected(-1)
+        n = self.box_list.count()
+        # liste içeriği kadar uzasın (en fazla 7 satır), kalan yer istatistiğe kalsın
+        row_h = self.box_list.sizeHintForRow(0) if n else 30
+        self.box_list.setFixedHeight(min(max(n, 1), 7) * (row_h + 2) + 6)
+        self.box_count.setText(str(n) if self.current else "")
+        self.box_list.setVisible(n > 0)
+        self.box_empty.setVisible(n == 0)
+        self.box_empty.setText("Bu fotoğrafta henüz kutu yok." if self.current else "Açık fotoğraf yok.")
+        self._update_box_buttons()
+
+    def _update_box_buttons(self):
+        on = 0 <= self.box_list.currentRow() < self.box_list.count()
+        self.b_edit_box.setEnabled(on)
+        self.b_del_box.setEnabled(on)
 
     def _refresh_current_list_item(self):
         it = self.image_list.currentItem()
         if it:
-            self._style_item(it, self.current, len(self.boxes))
-        labeled = sum(1 for i in self.images if self.project.get_boxes(i))
-        self.progress_label.setText(f"Etiketlenen: <b>{labeled}</b> / {len(self.images)} fotoğraf")
+            it.setData(ROLE_COUNT, len(self.boxes))
+        self._update_progress()
 
     # =================================================================
     #  İstatistik
@@ -1170,58 +1461,53 @@ class MainWindow(QMainWindow):
         if not self.project:
             return
         st = self.project.stats()
-        self.stats_summary.setText(
-            f"Toplam <b>{st['toplam_kutu']}</b> kutu, <b>{st['etiketli_resim']}</b> etiketli fotoğraf")
-        bold = QFont()
-        bold.setBold(True)
+        self.stats_summary.setText(f"{st['toplam_kutu']} kutu · {st['etiketli_resim']} etiketli fotoğraf")
         sel = self.sel
-        sel_bg = QBrush(QColor(47, 128, 237, 110))     # seçili satır arka planı
-        pend_fg = QBrush(QColor("#f0a020"))
 
-        def highlight(item, brush):
-            for col in (0, 1):
-                item.setBackground(col, brush)
-                item.setFont(col, bold)
+        def row(kind, text, data, count=None, key="", dot=None, state=None):
+            it = QTreeWidgetItem([text])
+            it.setData(0, Qt.ItemDataRole.UserRole, data)
+            it.setData(0, W.ROLE_KIND, kind)
+            it.setData(0, W.ROLE_COUNT, count)
+            it.setData(0, W.ROLE_KBD, key or "")
+            it.setData(0, W.ROLE_DOT, dot)
+            it.setData(0, W.ROLE_STATE, state)
+            return it
 
         for cls, info in st["siniflar"].items():
             c = self.project.get_class(cls) or {}
-            mark = "▶ " if sel and sel.cls == cls else ""
-            top = QTreeWidgetItem([mark + cls + shortcuts.label_for(c.get("kisayol", "")), str(info["toplam"])])
-            top.setData(0, Qt.ItemDataRole.UserRole, (cls, None, None))
-            top.setIcon(0, color_icon(self.project.color(cls)))
-            top.setFont(0, bold)
-            top.setFont(1, bold)
-            if mark:
-                highlight(top, sel_bg)
+            on = bool(sel and sel.cls == cls)
+            top = row("class", cls, (cls, None, None), info["toplam"], c.get("kisayol", ""),
+                      self.project.color(cls), "active" if on and not sel.attrs else None)
+            top.setToolTip(0, f"{cls}\nTıkla: aktif etiket yap")
             if not info["attr"]:                     # seçeneksiz sınıf: fotoğraflar doğrudan altında
                 self._make_photo_owner(top, (cls, None, None), info["toplam"])
+            flat = len(info["attr"]) == 1            # tek özellik: seçenekler doğrudan sınıfın altında
             for attr, counts in info["attr"].items():
                 a_def = self.project.get_attr(cls, attr) or {}
                 keys = a_def.get("kisayollar", {})
-                waiting = sel and sel.cls == cls and sel.pending == attr
-                a_item = QTreeWidgetItem([attr + ("   ← tuşla seçin" if waiting else ""), ""])
-                a_item.setData(0, Qt.ItemDataRole.UserRole, (cls, None, None))
-                if waiting:
-                    a_item.setForeground(0, pend_fg)
-                    a_item.setFont(0, bold)
+                waiting = on and sel.pending == attr
+                parent = top
+                if not flat:
+                    parent = row("attr", attr + ("  · tuşla seç" if waiting else ""), (cls, None, None),
+                                 state="pending" if waiting else None)
+                    top.addChild(parent)
                 for val, n in counts.items():
-                    chosen = sel and sel.cls == cls and sel.attrs.get(attr) == val
-                    v_item = QTreeWidgetItem([("✔ " if chosen else "") + val
-                                              + shortcuts.label_for(keys.get(val, "")), str(n)])
-                    v_item.setData(0, Qt.ItemDataRole.UserRole, (cls, attr, val))
-                    if chosen:
-                        highlight(v_item, sel_bg)
-                    elif n == 0:
-                        v_item.setForeground(0, QBrush(QColor("#999")))
-                        v_item.setForeground(1, QBrush(QColor("#c62828")))
+                    chosen = on and sel.attrs.get(attr) == val
+                    # tam tuş sırası: önce sınıfın tuşu, sonra seçeneğin (ör. 1 sonra 2)
+                    cls_key, opt_key = c.get("kisayol", ""), keys.get(val, "")
+                    v_item = row("option", val, (cls, attr, val), n,
+                                 f"{cls_key}\t{opt_key}" if cls_key and opt_key else "",
+                                 state="active" if chosen else ("zero" if n == 0 else None))
+                    v_item.setToolTip(0, f"{cls} › {val}\nTıkla: aktif etiket yap")
                     self._make_photo_owner(v_item, (cls, attr, val), n)
-                    a_item.addChild(v_item)
-                top.addChild(a_item)
+                    parent.addChild(v_item)
             self.stats_tree.addTopLevelItem(top)
             if info["attr"]:
                 top.setExpanded(True)
                 for i in range(top.childCount()):
-                    top.child(i).setExpanded(True)
+                    if top.child(i).data(0, W.ROLE_KIND) == "attr":
+                        top.child(i).setExpanded(True)
         # fotoğraf listesi açık olanları geri aç (açılınca doldurulur)
         for item in self._stats_items():
             if item.data(0, ROLE_KEY) in self.stats_open:
@@ -1288,7 +1574,9 @@ class MainWindow(QMainWindow):
             return
         photos = self._photos_for(key)
         for name, n in photos:
-            p = QTreeWidgetItem(["🖼 " + name, str(n)])
+            p = QTreeWidgetItem([name])
+            p.setData(0, W.ROLE_KIND, "photo")
+            p.setData(0, W.ROLE_COUNT, n)
             p.setData(0, ROLE_PHOTO, name)
             p.setToolTip(0, f"{name}\nTıkla: aç — A / D ile '{self._browse_label(key)}' fotoğraflarında gezin")
             item.addChild(p)
@@ -1305,19 +1593,13 @@ class MainWindow(QMainWindow):
 
     def _mark_current_photo(self, scroll=True):
         """İstatistikteki fotoğraf satırlarında açık olanı vurgular."""
-        bold = QFont()
-        bold.setBold(True)
         target = None
         for item in self._stats_items():
             name = item.data(0, ROLE_PHOTO)
             if name:
                 on = name == self.current
                 in_browse = on and item.parent().data(0, ROLE_KEY) == self.browse
-                brush = QBrush(QColor(21, 101, 192, 120)) if in_browse else (
-                    QBrush(QColor(47, 128, 237, 50)) if on else QBrush())
-                for col in (0, 1):
-                    item.setBackground(col, brush)
-                    item.setFont(col, bold if on else QFont())
+                item.setData(0, W.ROLE_STATE, "browse" if in_browse else ("current" if on else None))
                 if in_browse:
                     target = item
         if scroll and target is not None:
@@ -1348,7 +1630,7 @@ class MainWindow(QMainWindow):
             self._show_image(name)
         self.statusBar().showMessage(
             f"'{self._browse_label(key)}' fotoğraflarında geziniyorsunuz — A / D. "
-            "Bitirmek için üstteki mavi düğme ya da oku kapatın.", 6000)
+            "Bitirmek için üstteki filtrenin × düğmesine basın ya da oku kapatın.", 6000)
 
     def end_browse(self):
         if not self.browse:
@@ -1356,6 +1638,7 @@ class MainWindow(QMainWindow):
         self.browse = None
         self.btn_browse.hide()
         self._mark_current_photo(scroll=False)
+        self._update_title()
         self.statusBar().showMessage("Etikete göre gezinme bitti — A / D tüm fotoğraflarda gezer.", 3000)
 
     def _browse_step(self, d):

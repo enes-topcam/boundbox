@@ -19,7 +19,14 @@ def image_size(path):
     return w, h
 
 
+def box_label(box) -> str:
+    """Ekranda gösterilen etiket: 'corba › mercimek'."""
+    values = [v for v in box.get("attributeler", {}).values() if v]
+    return " › ".join([box["sinif"]] + values)
+
+
 def box_caption(box) -> str:
+    """Dışa aktarılan etiketli JPG'deki yazı (biçimi değişmesin)."""
     attrs = box.get("attributeler", {})
     if not attrs:
         return box["sinif"]

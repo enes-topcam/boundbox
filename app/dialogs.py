@@ -1,45 +1,95 @@
 from datetime import datetime
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QColorDialog, QDialog, QDialogButtonBox, QFileDialog,
+    QAbstractItemView, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QFileDialog,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QKeySequenceEdit, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QRadioButton,
-    QSpinBox, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QRadioButton,
+    QSpinBox, QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import shortcuts, voice
+from . import shortcuts, theme, voice
+from . import widgets as W
 from .selection import KeySelector
 
 
 def color_icon(color):
-    pm = QPixmap(14, 14)
-    pm.fill(QColor(color))
-    return QIcon(pm)
+    return W.dot_icon(color)
+
+
+def _dialog_layout(dlg, title):
+    """Pencere iskeleti: üstte başlık, ortada gövde, altta düğmeler (araları çizgiyle ayrılmış)."""
+    outer = QVBoxLayout(dlg)
+    outer.setContentsMargins(0, 0, 0, 0)
+    outer.setSpacing(0)
+    head = QWidget()
+    hl = QHBoxLayout(head)
+    hl.setContentsMargins(18, 14, 18, 12)
+    hl.addWidget(W.label(title, "dialogTitle"))
+    hl.addStretch()
+    outer.addWidget(head)
+    outer.addWidget(W.hline())
+    body = QWidget()
+    bl = QVBoxLayout(body)
+    bl.setContentsMargins(18, 14, 18, 14)
+    bl.setSpacing(10)
+    outer.addWidget(body, 1)
+    outer.addWidget(W.hline())
+    foot = QWidget()
+    fl = QHBoxLayout(foot)
+    fl.setContentsMargins(18, 12, 18, 12)
+    fl.setSpacing(8)
+    outer.addWidget(foot)
+    return bl, fl
 
 
 # =====================================================================
 #  Sınıf / Attribute / Seçenek ayarları
 # =====================================================================
-class _Column(QGroupBox):
-    """Başlık + liste + 'yaz, Enter' kutusu + butonlar."""
+class _Column(QFrame):
+    """Başlık + liste + 'yaz, Enter' kutusu + düğmeler."""
 
     def __init__(self, title, placeholder, parent=None):
-        super().__init__(title, parent)
+        super().__init__(parent)
+        self.setProperty("column", True)
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+        self.title = W.label(title, "strong")
+        self.title.setContentsMargins(4, 0, 0, 0)
+        lay.addWidget(self.title)
         self.list = QListWidget()
+        self.list.setIconSize(QSize(10, 10))
         self.edit = QLineEdit()
         self.edit.setPlaceholderText(placeholder)
-        self.btn_rename = QPushButton("Yeniden adlandır")
-        self.btn_delete = QPushButton("Sil")
+        self.btn_add = W.push_button("", "plus")
+        self.btn_add.setProperty("mini", True)
+        self.btn_add.setToolTip("Ekle (Enter)")
+        self.btn_add.setAutoDefault(False)
+        self.btn_add.clicked.connect(self.edit.returnPressed)
+        add_row = QHBoxLayout()
+        add_row.setSpacing(4)
+        add_row.addWidget(self.edit, 1)
+        add_row.addWidget(self.btn_add)
+        self.btn_rename = W.push_button("Yeniden adlandır", "pencil")
+        self.btn_delete = W.push_button("", "trash-2")
+        self.btn_delete.setProperty("mini", True)
+        self.btn_delete.setToolTip("Sil")
+        for b in (self.btn_rename, self.btn_delete):
+            b.setProperty("flat", True)
         row = QHBoxLayout()
+        row.setSpacing(4)
         row.addWidget(self.btn_rename)
         row.addWidget(self.btn_delete)
+        row.addStretch()
         self.extra = row
-        lay.addWidget(self.list)
-        lay.addWidget(self.edit)
+        lay.addWidget(self.list, 1)
+        lay.addLayout(add_row)
         lay.addLayout(row)
+
+    def setTitle(self, text):
+        self.title.setText(text)
 
     def current(self):
         it = self.list.currentItem()
@@ -60,7 +110,7 @@ class _Column(QGroupBox):
         self.list.blockSignals(False)
 
     def set_enabled(self, on):
-        for w in (self.list, self.edit, self.btn_rename, self.btn_delete):
+        for w in (self.list, self.edit, self.btn_add, self.btn_rename, self.btn_delete):
             w.setEnabled(on)
 
 
@@ -68,34 +118,33 @@ class SetupDialog(QDialog):
     def __init__(self, project, parent=None):
         super().__init__(parent)
         self.p = project
-        self.setWindowTitle("Sınıfları Düzenle")
-        self.resize(820, 460)
+        self.setWindowTitle("Sınıfları düzenle")
+        self.resize(780, 480)
+        body, foot = _dialog_layout(self, "Sınıfları düzenle")
 
-        info = QLabel(
-            "1) Sınıf adını yazıp <b>Enter</b>'a basın (ör. <i>corba</i>)   "
-            "2) Sınıfı seçip attribute ekleyin (ör. <i>corba_turu</i>)   "
-            "3) Attribute'u seçip seçenekleri tek tek yazıp <b>Enter</b>'a basın (ör. <i>mercimek</i>, <i>ezogelin</i>)")
-        info.setWordWrap(True)
+        info = W.label("Sınıfı seç, özelliklerini ve seçeneklerini düzenle. Adı yazıp <b>Enter</b>'a bas "
+                       "(ör. <i>corba</i> → <i>tur</i> → <i>mercimek</i>, <i>ezogelin</i>).", "muted", wrap=True)
 
-        self.c_cls = _Column("Sınıflar", "Sınıf adı yaz, Enter")
-        self.c_attr = _Column("Attribute'ler", "Attribute adı yaz, Enter")
-        self.c_opt = _Column("Seçenekler", "Seçenek yaz, Enter (ör. mercimek)")
-        self.btn_color = QPushButton("Renk")
-        self.c_cls.extra.insertWidget(0, self.btn_color)
+        self.c_cls = _Column("Sınıflar", "Yeni sınıf")
+        self.c_attr = _Column("Özellikler", "Yeni özellik")
+        self.c_opt = _Column("Seçenekler", "Yeni seçenek")
+        self.btn_color = W.push_button("Renk")
+        self.btn_color.setProperty("flat", True)
+        self.btn_color.setToolTip("Sınıfın rengini değiştir")
+        self.c_cls.extra.insertWidget(2, self.btn_color)
 
         cols = QHBoxLayout()
+        cols.setSpacing(9)
         for c in (self.c_cls, self.c_attr, self.c_opt):
-            cols.addWidget(c)
-        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        close.rejected.connect(self.accept)
-        # Enter tuşu dialogu kapatmasın
-        for b in close.buttons():
-            b.setAutoDefault(False)
+            cols.addWidget(c, 1)
+        close = W.push_button("Kapat", slot=self.accept)
+        close.setAutoDefault(False)        # Enter pencereyi kapatmasın
 
-        lay = QVBoxLayout(self)
-        lay.addWidget(info)
-        lay.addLayout(cols)
-        lay.addWidget(close)
+        body.addWidget(info)
+        body.addLayout(cols, 1)
+        foot.addWidget(W.label("Değişiklikler otomatik kaydedilir.", "muted"))
+        foot.addStretch()
+        foot.addWidget(close)
 
         self.c_cls.list.currentRowChanged.connect(lambda _: self.refresh_attrs())
         self.c_attr.list.currentRowChanged.connect(lambda _: self.refresh_opts())
@@ -119,13 +168,15 @@ class SetupDialog(QDialog):
         names = self.p.class_names()
         self.c_cls.fill(names, keep or self.c_cls.current(),
                         {c["ad"]: color_icon(c["renk"]) for c in self.p.classes})
+        cur = self.c_cls.current()
+        self.btn_color.setIcon(color_icon(self.p.color(cur)) if cur else QIcon())
         self.btn_color.setEnabled(bool(names))
         self.refresh_attrs()
 
     def refresh_attrs(self, keep=None):
         cls = self.p.get_class(self.c_cls.current() or "")
         self.c_attr.set_enabled(cls is not None)
-        self.c_attr.setTitle(f"Attribute'ler — {cls['ad']}" if cls else "Attribute'ler")
+        self.c_attr.setTitle(f"Özellikler — {cls['ad']}" if cls else "Özellikler")
         self.c_attr.fill([a["ad"] for a in cls["attributeler"]] if cls else [], keep or self.c_attr.current())
         self.refresh_opts()
 
@@ -154,7 +205,7 @@ class SetupDialog(QDialog):
     def add_attr(self):
         name = self._take(self.c_attr.edit)
         if name and not self.p.add_attribute(self.c_cls.current(), name):
-            QMessageBox.warning(self, "Uyarı", "Bu attribute zaten var.")
+            QMessageBox.warning(self, "Uyarı", "Bu özellik zaten var.")
             return
         if name:
             self.refresh_attrs(keep="_".join(name.split()))
@@ -205,7 +256,7 @@ class SetupDialog(QDialog):
                 self.p.remove_class(cls)
                 self.refresh_classes()
         elif kind == "attr" and attr:
-            if self._confirm(f"'{attr}' attribute'u silinsin mi?\n(Kutulardaki bu bilgi de silinir.)"):
+            if self._confirm(f"'{attr}' özelliği silinsin mi?\n(Kutulardaki bu bilgi de silinir.)"):
                 self.p.remove_attribute(cls, attr)
                 self.refresh_attrs()
         elif kind == "opt" and opt:
@@ -245,36 +296,33 @@ class LabelDialog(QDialog):
         self.built_for = None
         self.attr_box = None
         self.attr_groups = {}
-        self.setWindowTitle("Bu ne?")
+        self.setWindowTitle("Kutu etiketi")
         self.setMinimumWidth(420)
+        lay, foot = _dialog_layout(self, "Kutu etiketi")
 
-        lay = QVBoxLayout(self)
-        self.hint = QLabel()
-        self.hint.setWordWrap(True)
-        self.hint.setStyleSheet("color:#c77800; font-weight:bold;")
+        self.hint = W.label("", "muted", wrap=True)
         lay.addWidget(self.hint)
-        lay.addWidget(QLabel("<b>Sınıf</b>"))
+        lay.addWidget(W.label("Sınıf", "strong"))
         self.cls_group = QButtonGroup(self)
         grid = QGridLayout()
+        grid.setSpacing(6)
         for i, c in enumerate(project.classes):
-            key = c.get("kisayol", "")
-            rb = QRadioButton(c["ad"] + (f"  [{key}]" if key else ""))
-            rb.setIcon(color_icon(c["renk"]))
-            self.cls_group.addButton(rb, i)
-            grid.addWidget(rb, i // 3, i % 3)
+            b = W.ChoiceButton(c["ad"], c.get("kisayol", ""), c["renk"])
+            self.cls_group.addButton(b, i)
+            grid.addWidget(b, i // 3, i % 3)
         lay.addLayout(grid)
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        lay.addWidget(line)
+        lay.addWidget(W.hline())
         self.attr_holder = QVBoxLayout()
         lay.addLayout(self.attr_holder)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Tamam (Enter)")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("İptal (Esc)")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        lay.addWidget(buttons)
+        cancel = W.push_button("İptal · Esc", slot=self.reject)
+        ok = W.push_button("Onayla · Enter", slot=self.accept, primary=True)
+        ok.setDefault(True)
+        cancel.setAutoDefault(False)
+        cancel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        foot.addStretch()
+        foot.addWidget(cancel)
+        foot.addWidget(ok)
 
         for key in self.sel.all_keys():
             QShortcut(QKeySequence(key), self).activated.connect(lambda k=key: self._on_key(k))
@@ -320,9 +368,9 @@ class LabelDialog(QDialog):
             if v in values:
                 group.button(values.index(v)).setChecked(True)
         if self.sel.pending:
-            self.hint.setText(f"{cls} → {self.sel.pending} için tuşa basın:   {self.sel.options_hint()}")
+            self.hint.setText(f"{cls} › <b>{self.sel.pending}</b> için tuşa bas:  {self.sel.options_hint()}")
         else:
-            self.hint.setText("Tuşla seçebilirsiniz: önce sınıf, sonra seçenek.  Enter: tamam")
+            self.hint.setText("Önce sınıfın, sonra seçeneğin tuşuna bas ya da tıkla. Enter onaylar.")
 
     def _build_attrs(self, cls):
         self.built_for = cls
@@ -334,23 +382,25 @@ class LabelDialog(QDialog):
         self.attr_holder.addWidget(self.attr_box)
         self.attr_groups = {}
         remembered = self.memory.get("attr", {}).get(cls, {})
+        self.attr_lay.setSpacing(6)
         for a in self.sel.attr_defs(cls):
-            self.attr_lay.addWidget(QLabel(f"<b>{a['ad']}</b>"))
+            self.attr_lay.addWidget(W.label(a["ad"], "strong"))
             group = QButtonGroup(self.attr_box)
             grid = QGridLayout()
+            grid.setSpacing(6)
             keys = a.get("kisayollar", {})
             for j, v in enumerate(a["secenekler"]):
-                rb = QRadioButton(v + (f"  [{keys[v]}]" if keys.get(v) else ""))
-                rb.clicked.connect(lambda _=False, an=a["ad"], val=v: self._option_clicked(an, val))
-                group.addButton(rb, j)
-                grid.addWidget(rb, j // 3, j % 3)
+                b = W.ChoiceButton(v, keys.get(v, ""))
+                b.clicked.connect(lambda _=False, an=a["ad"], val=v: self._option_clicked(an, val))
+                group.addButton(b, j)
+                grid.addWidget(b, j // 3, j % 3)
             # henüz seçilmediyse son kullanılanı ya da ilkini işaretle
             want = remembered.get(a["ad"])
             group.button(a["secenekler"].index(want) if want in a["secenekler"] else 0).setChecked(True)
             self.attr_lay.addLayout(grid)
             self.attr_groups[a["ad"]] = (group, a["secenekler"])
         if not self.attr_groups:
-            self.attr_lay.addWidget(QLabel("<span style='color:gray'>Bu sınıfın attribute'u yok.</span>"))
+            self.attr_lay.addWidget(W.label("Bu sınıfa seçenek tanımlanmamış.", "muted"))
         self.adjustSize()
 
     def result_box(self):
@@ -364,77 +414,99 @@ class LabelDialog(QDialog):
 #  Dışa aktar
 # =====================================================================
 class ExportDialog(QDialog):
-    FORMATS = [
-        ("json", "JSON  (kendi formatımız, sınıf + attribute'ler)", True),
-        ("jpg", "Etiketli JPG  (kutular resmin üstüne çizilmiş)", True),
-        ("cvat", "CVAT XML  (örnek dosyanızdaki format, CVAT'a geri yüklenebilir)", True),
-        ("voc", "Pascal VOC XML  (her resim için bir .xml)", False),
-        ("yolo", "YOLO  (txt + data.yaml, model eğitmek için)", True),
-        ("coco", "COCO JSON  (Detectron, MMDetection vb.)", False),
+    FORMATS = [   # (anahtar, ad, açıklama, varsayılan)
+        ("json", "JSON", "Proje etiketleri", True),
+        ("jpg", "Etiketli JPG", "Kutuların görsel kontrolü", True),
+        ("cvat", "CVAT XML", "CVAT'a geri yükleme", True),
+        ("voc", "Pascal VOC XML", "Fotoğraf başına XML", False),
+        ("yolo", "YOLO", "TXT ve data.yaml", True),
+        ("coco", "COCO JSON", "COCO biçiminde tek dosya", False),
     ]
 
     def __init__(self, project, parent=None):
         super().__init__(parent)
         self.p = project
-        self.setWindowTitle("Dışa Aktar")
-        self.setMinimumWidth(520)
-        lay = QVBoxLayout(self)
+        self.setWindowTitle("Dışa aktar")
+        self.setMinimumWidth(640)
+        lay, foot = _dialog_layout(self, "Dışa aktar")
 
-        fbox = QGroupBox("Hangi formatlar?")
-        fl = QVBoxLayout(fbox)
+        fbox = QGroupBox("Çıktı formatları")
+        fl = QGridLayout(fbox)
+        fl.setHorizontalSpacing(16)
+        fl.setVerticalSpacing(2)
         self.checks = {}
-        for key, text, default in self.FORMATS:
-            cb = QCheckBox(text)
+        for i, (key, name, desc, default) in enumerate(self.FORMATS):
+            cell = QHBoxLayout()
+            cell.setSpacing(0)
+            cb = QCheckBox(name)
+            cb.setStyleSheet("QCheckBox { font-weight: 700; }")
             cb.setChecked(default)
-            fl.addWidget(cb)
+            cell.addWidget(cb)
+            cell.addWidget(W.label(f" · {desc}", "small"))
+            cell.addStretch()
+            fl.addLayout(cell, i // 2, i % 2)
             self.checks[key] = cb
+            cb.toggled.connect(lambda _=False: self.err.hide())
         lay.addWidget(fbox)
+        self.err = W.label("En az bir çıktı biçimi seç.", "error")
+        self.err.hide()
+        lay.addWidget(self.err)
 
         self.ybox = QGroupBox("YOLO ayarları")
         yl = QVBoxLayout(self.ybox)
-        self.y_cls = QRadioButton("YOLO sınıfı = sadece sınıf  (corba)")
-        self.y_attr = QRadioButton("YOLO sınıfı = sınıf + seçenek  (corba_mercimek, corba_ezogelin ...)")
+        yl.setSpacing(2)
+        self.y_cls = QRadioButton("Yalnızca sınıf · corba")
+        self.y_attr = QRadioButton("Sınıf + seçenek · corba_mercimek, corba_ezogelin …")
         self.y_attr.setChecked(True)
         yl.addWidget(self.y_cls)
         yl.addWidget(self.y_attr)
         vrow = QHBoxLayout()
-        self.val_check = QCheckBox("Train / Val olarak ayır, val oranı %")
+        self.val_check = QCheckBox("Train / Val olarak ayır")
         self.val_check.setChecked(True)
         self.val_spin = QSpinBox()
         self.val_spin.setRange(5, 50)
         self.val_spin.setValue(20)
+        self.val_spin.setFixedWidth(64)
+        self.val_check.toggled.connect(self.val_spin.setEnabled)
         vrow.addWidget(self.val_check)
-        vrow.addWidget(self.val_spin)
         vrow.addStretch()
+        vrow.addWidget(W.label("Val %", "muted"))
+        vrow.addWidget(self.val_spin)
         yl.addLayout(vrow)
         lay.addWidget(self.ybox)
         self.checks["yolo"].toggled.connect(self.ybox.setEnabled)
 
-        gbox = QGroupBox("Genel")
+        gbox = QGroupBox("Kapsam ve klasör")
         gl = QVBoxLayout(gbox)
-        self.only_labeled = QCheckBox("Sadece etiketlenmiş resimleri aktar")
+        gl.setSpacing(2)
+        self.only_labeled = QCheckBox("Sadece etiketlenmiş fotoğraflar")
         self.only_labeled.setChecked(True)
-        self.copy_images = QCheckBox("Orijinal resimleri de kopyala (YOLO / VOC / COCO klasörlerine)")
+        self.copy_images = QCheckBox("Orijinal fotoğrafları da kopyala (YOLO / VOC / COCO klasörlerine)")
         self.copy_images.setChecked(True)
         gl.addWidget(self.only_labeled)
         gl.addWidget(self.copy_images)
         orow = QHBoxLayout()
+        orow.setSpacing(6)
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         self.out_edit = QLineEdit(str(project.export_dir / stamp))
-        browse = QPushButton("Seç...")
-        browse.clicked.connect(self._browse)
-        orow.addWidget(QLabel("Klasör:"))
-        orow.addWidget(self.out_edit)
+        self.out_edit.setProperty("path", True)
+        self.out_edit.setToolTip(self.out_edit.text())
+        self.out_edit.textChanged.connect(self.out_edit.setToolTip)
+        browse = W.push_button("Klasör seç", "folder-open", slot=self._browse)
+        browse.setAutoDefault(False)
+        orow.addWidget(self.out_edit, 1)
         orow.addWidget(browse)
+        gl.addSpacing(6)
         gl.addLayout(orow)
         lay.addWidget(gbox)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Dışa Aktar")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("İptal")
-        buttons.accepted.connect(self._ok)
-        buttons.rejected.connect(self.reject)
-        lay.addWidget(buttons)
+        cancel = W.push_button("İptal", slot=self.reject)
+        cancel.setAutoDefault(False)
+        ok = W.push_button("Dışa aktar", "download", slot=self._ok, primary=True)
+        ok.setDefault(True)
+        foot.addStretch()
+        foot.addWidget(cancel)
+        foot.addWidget(ok)
 
     def _browse(self):
         d = QFileDialog.getExistingDirectory(self, "Dışa aktarma klasörü", self.out_edit.text())
@@ -443,7 +515,7 @@ class ExportDialog(QDialog):
 
     def _ok(self):
         if not self.formats():
-            QMessageBox.warning(self, "Uyarı", "En az bir format seçin.")
+            self.err.show()
             return
         self.accept()
 
@@ -468,6 +540,10 @@ def _key_edit(value):
     ed.setMaximumSequenceLength(1)
     ed.setClearButtonEnabled(True)
     ed.setMinimumWidth(140)
+    line = ed.findChild(QLineEdit)
+    if line is not None:
+        line.setPlaceholderText("Tuşa bas")
+        line.setFont(theme.mono_font(12))
     return ed
 
 
@@ -475,36 +551,125 @@ def _key_text(ed):
     return shortcuts.norm(ed.keySequence().toString(QKeySequence.SequenceFormat.PortableText))
 
 
+class _AliasLine(QLineEdit):
+    """Enter: yazılanı ekle (pencere kapanmasın). Boşken Backspace: son eklenen adı sil."""
+
+    def __init__(self, owner):
+        super().__init__()
+        self.owner = owner
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.owner.commit()
+            e.accept()
+            return
+        if e.key() == Qt.Key.Key_Backspace and not self.text() and self.owner.names:
+            self.owner.remove(self.owner.names[-1])
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
+
+class AliasEdit(QWidget):
+    """Birden fazla sesli ad: yaz + Enter → eklenir, ✕ ile silinir. text() virgülle birleştirir."""
+    _CHIP = ("QToolButton { border: 1px solid palette(mid); border-radius: 9px; padding: 0 7px;"
+             " background: palette(alternate-base); }"
+             "QToolButton:hover { border-color: #e53935; color: #e53935; }")
+
+    def __init__(self, value="", name="", parent=None):
+        super().__init__(parent)
+        self.name = name.replace("_", " ")
+        self.names = []
+        self._chips = {}
+        self._lay = QHBoxLayout(self)
+        self._lay.setContentsMargins(0, 1, 0, 1)
+        self._lay.setSpacing(3)
+        self.edit = _AliasLine(self)
+        self.edit.setMinimumWidth(90)
+        self.edit.setToolTip("Yazıp Enter'a bas, eklensin. İstediğin kadar ekleyebilirsin.\n"
+                             "Silmek için adın üstüne tıkla (ya da boş kutuda Backspace).")
+        self._lay.addWidget(self.edit, 1)
+        for n in voice._aliases(value):
+            self.add(n)
+        self._update_placeholder()
+
+    def add(self, name):
+        name = " ".join(name.split())
+        if not name or name.lower() in (n.lower() for n in self.names):
+            return
+        b = QToolButton()
+        b.setText(f"{name}  ✕")
+        b.setToolTip("Silmek için tıkla")
+        b.setStyleSheet(self._CHIP)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        b.clicked.connect(lambda _=False, n=name: self.remove(n))
+        self._lay.insertWidget(len(self.names), b)
+        self.names.append(name)
+        self._chips[name] = b
+        self._update_placeholder()
+
+    def remove(self, name):
+        b = self._chips.pop(name, None)
+        if b:
+            self.names.remove(name)
+            b.deleteLater()
+            self._update_placeholder()
+            self.edit.setFocus()
+
+    def commit(self):
+        """Kutuda yazılı olanı (virgülle birden fazla da olabilir) ekler."""
+        for n in voice._aliases(self.edit.text()):
+            self.add(n)
+        self.edit.clear()
+
+    def _update_placeholder(self):
+        self.edit.setPlaceholderText("+ ekle (Enter)" if self.names else f"{self.name}  — yaz, Enter")
+
+    def text(self):
+        self.commit()                        # Enter'a basılmadan bırakılan da kaydedilsin
+        return ", ".join(self.names)
+
+
 class SettingsDialog(QDialog):
     TAB_SES = 2
 
-    def __init__(self, project, settings, parent=None, tab=0):
+    def __init__(self, project, settings, parent=None, tab=0, refresh_devices=None):
         super().__init__(parent)
         self.p = project
         self.settings = settings
+        self._refresh_devices = refresh_devices
         self.setWindowTitle("Ayarlar")
-        self.resize(580, 600)
+        self.resize(640, 640)
+        body, foot = _dialog_layout(self, "Ayarlar")
         tabs = QTabWidget()
-
-        # ---------- sınıf / seçenek kısayolları ----------
-        t1 = QWidget()
-        l1 = QVBoxLayout(t1)
-        info = QLabel(
-            "Kutuya tıklayıp tuşa basarak kısayol atayın (silmek için ✕).<br><br>"
-            "<b>Nasıl çalışır:</b> önce <b>sınıf</b> tuşuna, sonra <b>seçenek</b> tuşuna basılır.<br>"
-            "Ör. <b>1</b> sonra <b>3</b> = corba → mantar. Hepsi seçilince kutular "
-            "<b>menü açılmadan</b> direkt bu şekilde etiketlenir.<br>"
-            "Seçenek tuşları sadece kendi sınıfı seçiliyken çalışır, bu yüzden her sınıfta 1, 2, 3 "
-            "kullanılabilir. Seçimi sıfırlama tuşu 'Genel kısayollar' sekmesinde.")
-        info.setWordWrap(True)
-        l1.addWidget(info)
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Sınıf / Seçenek", "Kısayol"])
-        self.tree.setColumnWidth(0, 300)
-        self.class_edits = {}     # sinif -> edit
-        self.option_edits = {}    # (sinif, attr, deger) -> edit
+        tabs.setDocumentMode(True)
+        body.addWidget(tabs, 1)
         bold = QFont()
         bold.setBold(True)
+
+        def tab_page(text):
+            page = QWidget()
+            lay = QVBoxLayout(page)
+            lay.setContentsMargins(0, 10, 0, 0)
+            lay.setSpacing(8)
+            if text:
+                lay.addWidget(W.label(text, "muted", wrap=True))
+            return page, lay
+
+        # ---------- sınıf / seçenek kısayolları ----------
+        t1, l1 = tab_page(
+            "Önce sınıfın, sonra seçeneğin tuşuna basılır (ör. <b>1</b> sonra <b>3</b> = corba › mantar). "
+            "Seçenek tuşları farklı sınıflarda tekrar kullanılabilir. Tuşu değiştirmek için kutuya tıklayıp "
+            "tuşa bas, silmek için ×.")
+        self.tree = QTreeWidget()
+        self.tree.setProperty("framed", True)
+        self.tree.setHeaderLabels(["Sınıf / seçenek", "Kısayol"])
+        self.tree.setColumnWidth(0, 330)
+        self.tree.setIndentation(16)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.class_edits = {}     # sinif -> edit
+        self.option_edits = {}    # (sinif, attr, deger) -> edit
         for c in project.classes:
             top = QTreeWidgetItem([c["ad"]])
             top.setIcon(0, color_icon(c["renk"]))
@@ -514,7 +679,8 @@ class SettingsDialog(QDialog):
             self.tree.setItemWidget(top, 1, ed)
             self.class_edits[c["ad"]] = ed
             for a in c["attributeler"]:
-                a_item = QTreeWidgetItem([a["ad"] + "   (sınıftan sonra basılır)"])
+                a_item = QTreeWidgetItem([a["ad"]])
+                a_item.setForeground(0, self.palette().placeholderText())
                 top.addChild(a_item)
                 for v in a["secenekler"]:
                     v_item = QTreeWidgetItem([v])
@@ -523,57 +689,74 @@ class SettingsDialog(QDialog):
                     self.tree.setItemWidget(v_item, 1, ed)
                     self.option_edits[(c["ad"], a["ad"], v)] = ed
         self.tree.expandAll()
-        l1.addWidget(self.tree)
-        tabs.addTab(t1, "Sınıf / seçenek kısayolları")
+        l1.addWidget(self.tree, 1)
+        tabs.addTab(t1, "Sınıf / seçenek")
 
         # ---------- genel kısayollar ----------
-        t2 = QWidget()
-        l2 = QGridLayout(t2)
+        t2, l2v = tab_page("")
+        grid = QGridLayout()
+        grid.setVerticalSpacing(6)
+        grid.setHorizontalSpacing(12)
         current = shortcuts.load_general(settings)
         self.general_edits = {}
         for row, (k, text, _default) in enumerate(shortcuts.GENERAL):
-            l2.addWidget(QLabel(text), row, 0)
+            grid.addWidget(QLabel(text), row, 0)
             ed = _key_edit(current[k])
-            l2.addWidget(ed, row, 1)
+            grid.addWidget(ed, row, 1)
             self.general_edits[k] = ed
-        l2.setRowStretch(len(shortcuts.GENERAL), 1)
+        grid.setColumnStretch(0, 1)
+        l2v.addLayout(grid)
+        l2v.addStretch()
         tabs.addTab(t2, "Genel kısayollar")
 
         # ---------- sesle seçim ----------
-        t4 = QWidget()
-        l4 = QVBoxLayout(t4)
-        keys = shortcuts.load_general(settings)
-        info = QLabel(
-            "Seçmek istediğini söyle, ör. <b>\"mercimek çorbası\"</b> → corba → mercimek seçilir, "
-            "sen sadece kutuyu çizersin. Sadece seçeneği söylemek de yeter (<b>\"mercimek\"</b>).<br><br>"
-            f"Mikrofonu aç / kapat: <b>{keys['ses_ac_kapat'] or '—'}</b> ya da üstteki 🎤 simgesine tıkla. "
-            f"Bas-konuş tuşu: <b>{keys['ses_baskonus'] or '—'}</b>. Tuşları 'Genel kısayollar' sekmesinden "
-            "değiştirebilirsin.<br><br>"
-            "<b>Sesli ad:</b> program bir adı iyi anlamıyorsa ya da kısaca söylemek istersen buraya yaz. "
-            "Birden fazlası virgülle ayrılır (ör. <i>ezo, ezogelin</i>). Boş bırakılırsa adın kendisi kullanılır.")
-        info.setWordWrap(True)
-        l4.addWidget(info)
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Dinleme şekli:"))
+        t4, l4 = tab_page(
+            "<b>\"Mercimek çorbası\"</b> ya da <b>\"mercimek\"</b> söyleyerek etiket seç; sen sadece kutuyu çizersin.")
+        mode_box = QGroupBox("Dinleme modu")
+        ml = QVBoxLayout(mode_box)
+        ml.setSpacing(2)
         self.mode_buttons = {}
         cur_mode = settings.value("ses/mod", "baskonus")
         for key, text in voice.MODES:
             rb = QRadioButton(text)
             rb.setChecked(key == cur_mode)
             self.mode_buttons[key] = rb
-            mode_row.addWidget(rb)
-        mode_row.addStretch()
-        l4.addLayout(mode_row)
+            ml.addWidget(rb)
+        l4.addWidget(mode_box)
+        l4.addWidget(W.label("Mikrofon", "muted"))
+        dev_row = QHBoxLayout()
+        dev_row.setSpacing(6)
+        self.device_combo = QComboBox()
+        dev_row.addWidget(self.device_combo, 1)
+        refresh = W.push_button("Yenile", "refresh-cw", slot=self._reload_devices)
+        refresh.setToolTip("Sonradan taktığın mikrofon listede yoksa bas")
+        refresh.setAutoDefault(False)
+        refresh.setVisible(refresh_devices is not None)
+        dev_row.addWidget(refresh)
+        l4.addLayout(dev_row)
+        self._fill_devices(settings.value("ses/cihaz", ""))
+        key_grid = QGridLayout()
+        key_grid.setVerticalSpacing(6)
+        for row, (k, text) in enumerate((("ses_baskonus", "Bas-konuş"), ("ses_ac_kapat", "Mikrofonu aç / kapat"))):
+            key_grid.addWidget(QLabel(text), row, 0)
+            key_grid.addWidget(self._mirror_key_edit(k), row, 1)
+        key_grid.setColumnStretch(0, 1)
+        l4.addLayout(key_grid)
+        l4.addWidget(W.label(
+            "<b>Sesli ad:</b> program bir adı iyi anlamıyorsa ya da kısaca söylemek istersen yaz ve "
+            "<b>Enter</b>'a bas; her Enter bir ad ekler (ör. <i>ezo</i>). Silmek için adın üstüne tıkla. "
+            "Boş bırakılırsa adın kendisi kullanılır.", "muted", wrap=True))
         self.voice_tree = QTreeWidget()
-        self.voice_tree.setHeaderLabels(["Sınıf / Seçenek", "Sesli ad"])
-        self.voice_tree.setColumnWidth(0, 240)
+        self.voice_tree.setProperty("framed", True)
+        self.voice_tree.setHeaderLabels(["Sınıf / seçenek", "Sesli ad"])
+        self.voice_tree.setColumnWidth(0, 200)
+        self.voice_tree.setIndentation(16)
+        self.voice_tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.class_voice = {}     # sinif -> edit
         self.option_voice = {}    # (sinif, attr, deger) -> edit
 
         def voice_edit(value, name):
-            ed = QLineEdit(value or "")
-            ed.setPlaceholderText(name.replace("_", " "))
-            return ed
+            return AliasEdit(value or "", name)
         for c in project.classes:
             top = QTreeWidgetItem([c["ad"]])
             top.setIcon(0, color_icon(c["renk"]))
@@ -584,43 +767,42 @@ class SettingsDialog(QDialog):
             self.class_voice[c["ad"]] = ed
             for a in c["attributeler"]:
                 for v in a["secenekler"]:
-                    v_item = QTreeWidgetItem([f"{v}   ({a['ad']})"])
+                    v_item = QTreeWidgetItem([v])
+                    v_item.setToolTip(0, f"{c['ad']} › {a['ad']} › {v}")
                     top.addChild(v_item)
                     ed = voice_edit(a.get("sesli_adlar", {}).get(v), v)
                     self.voice_tree.setItemWidget(v_item, 1, ed)
                     self.option_voice[(c["ad"], a["ad"], v)] = ed
         self.voice_tree.expandAll()
-        l4.addWidget(self.voice_tree)
+        l4.addWidget(self.voice_tree, 1)
         tabs.addTab(t4, "Sesle seçim")
 
         # ---------- diğer ----------
-        t3 = QWidget()
-        l3 = QVBoxLayout(t3)
+        t3, l3 = tab_page("")
         n = project.trash_count()
-        self.trash_label = QLabel(f"Çöp kutusunda {n} silinmiş fotoğraf var (geri al ile geri getirilebilirler).")
-        self.trash_btn = QPushButton("Çöp kutusunu boşalt (kalıcı olarak sil)")
+        l3.addWidget(W.label("Çöp kutusu", "strong"))
+        self.trash_label = W.label(f"Çöp kutusunda {n} silinmiş fotoğraf var (geri al ile geri getirilebilirler).",
+                                   "muted", wrap=True)
+        self.trash_btn = W.push_button("Çöp kutusunu boşalt (kalıcı olarak sil)", "trash-2", slot=self._empty_trash)
+        self.trash_btn.setAutoDefault(False)
         self.trash_btn.setEnabled(n > 0)
-        self.trash_btn.clicked.connect(self._empty_trash)
+        row = QHBoxLayout()
+        row.addWidget(self.trash_btn)
+        row.addStretch()
         l3.addWidget(self.trash_label)
-        l3.addWidget(self.trash_btn)
+        l3.addLayout(row)
         l3.addStretch()
         tabs.addTab(t3, "Diğer")
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
-                                   | QDialogButtonBox.StandardButton.Cancel
-                                   | QDialogButtonBox.StandardButton.RestoreDefaults)
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Kaydet")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("İptal")
-        buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).setText("Varsayılanlar")
-        buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(self._defaults)
-        buttons.accepted.connect(self._save)
-        buttons.rejected.connect(self.reject)
-        for b in buttons.buttons():
+        defaults = W.push_button("Varsayılanlar", slot=self._defaults)
+        cancel = W.push_button("İptal", slot=self.reject)
+        save = W.push_button("Kaydet", slot=self._save, primary=True)
+        for b in (defaults, cancel, save):
             b.setAutoDefault(False)
-
-        lay = QVBoxLayout(self)
-        lay.addWidget(tabs)
-        lay.addWidget(buttons)
+        foot.addWidget(defaults)
+        foot.addStretch()
+        foot.addWidget(cancel)
+        foot.addWidget(save)
         tabs.setCurrentIndex(tab)
 
     def _defaults(self):
@@ -634,6 +816,38 @@ class SettingsDialog(QDialog):
         for k, _t, default in shortcuts.GENERAL:
             self.general_edits[k].setKeySequence(QKeySequence(default))
 
+    def _mirror_key_edit(self, k):
+        """'Genel kısayollar'daki tuş kutusunun bu sekmedeki eşi: biri değişince öbürü de değişir."""
+        main = self.general_edits[k]
+        twin = _key_edit(_key_text(main))
+
+        def sync(src, dst):
+            if dst.keySequence() != src.keySequence():
+                dst.setKeySequence(src.keySequence())
+        twin.keySequenceChanged.connect(lambda _=None: sync(twin, main))
+        main.keySequenceChanged.connect(lambda _=None: sync(main, twin))
+        return twin
+
+    def _fill_devices(self, current):
+        self.device_combo.clear()
+        self.device_combo.addItem("Varsayılan (Windows ayarı)", "")
+        names = [n for _i, n in voice.input_devices()]
+        for n in names:
+            self.device_combo.addItem(n, n)
+        if current and current not in names:
+            self.device_combo.addItem(f"{current}  (şu an takılı değil)", current)
+        self.device_combo.setCurrentIndex(max(0, self.device_combo.findData(current)))
+
+    def _reload_devices(self):
+        cur = self.device_combo.currentData() or ""
+        if self._refresh_devices:
+            self._refresh_devices()
+        self._fill_devices(cur)
+
+    @property
+    def device_name(self):
+        return self.device_combo.currentData() or ""
+
     def _empty_trash(self):
         if QMessageBox.question(self, "Onay", "Çöp kutusundaki fotoğraflar KALICI olarak silinecek. "
                                               "Bunlar artık geri alınamaz. Emin misiniz?") \
@@ -644,37 +858,47 @@ class SettingsDialog(QDialog):
         self.trash_btn.setEnabled(False)
 
     def _clashes(self):
+        """Çakışan tuşların açıklamaları; çakışan kutular kırmızı çerçeveyle işaretlenir."""
         clashes = []
+        bad = set()
 
         def check(entries):
             used = {}
-            for name, key in entries:
+            for name, key, ed in entries:
                 if not key:
                     continue
                 if key in used:
-                    clashes.append(f"[{key}]  {used[key]}  ve  {name}")
+                    clashes.append(f"[{key}]  {used[key][0]}  ve  {name}")
+                    bad.update((used[key][1], ed))
                 else:
-                    used[key] = name
+                    used[key] = (name, ed)
 
         # sınıflar kendi aralarında farklı olmalı
-        check([(f"sınıf '{c}'", _key_text(ed)) for c, ed in self.class_edits.items()])
-        # aynı attribute'un seçenekleri kendi aralarında farklı olmalı
+        check([(f"sınıf '{c}'", _key_text(ed), ed) for c, ed in self.class_edits.items()])
+        # aynı özelliğin seçenekleri kendi aralarında farklı olmalı
         for c in self.p.classes:
             for a in c["attributeler"]:
-                check([(f"'{c['ad']} → {v}'", _key_text(self.option_edits[(c["ad"], a["ad"], v)]))
-                       for v in a["secenekler"]])
+                check([(f"'{c['ad']} › {v}'", _key_text(ed), ed)
+                       for v in a["secenekler"] for ed in [self.option_edits[(c["ad"], a["ad"], v)]]])
         # genel kısayollar hem birbirinden hem sınıf/seçenek tuşlarından farklı olmalı
         label_keys = {}
         for c, ed in self.class_edits.items():
-            label_keys.setdefault(_key_text(ed), f"sınıf '{c}'")
+            label_keys.setdefault(_key_text(ed), (f"sınıf '{c}'", []))[1].append(ed)
         for (c, _a, v), ed in self.option_edits.items():
-            label_keys.setdefault(_key_text(ed), f"'{c} → {v}'")
+            label_keys.setdefault(_key_text(ed), (f"'{c} › {v}'", []))[1].append(ed)
         label_keys.pop("", None)
-        check([(f"'{t}'", _key_text(self.general_edits[k])) for k, t, _d in shortcuts.GENERAL])
+        check([(f"'{t}'", _key_text(self.general_edits[k]), self.general_edits[k]) for k, t, _d in shortcuts.GENERAL])
         for k, t, _d in shortcuts.GENERAL:
-            key = _key_text(self.general_edits[k])
+            ed = self.general_edits[k]
+            key = _key_text(ed)
             if key and key in label_keys:
-                clashes.append(f"[{key}]  '{t}'  ve  {label_keys[key]}")
+                clashes.append(f"[{key}]  '{t}'  ve  {label_keys[key][0]}")
+                bad.add(ed)
+                bad.update(label_keys[key][1])
+        for ed in list(self.class_edits.values()) + list(self.option_edits.values()) + list(self.general_edits.values()):
+            W.prop(ed, "invalid", ed in bad)
+            for child in ed.findChildren(QLineEdit):
+                W.prop(child, "invalid", ed in bad)
         return clashes
 
     def _save(self):
@@ -701,15 +925,16 @@ class SettingsDialog(QDialog):
 # =====================================================================
 #  Aynı fotoğraf zaten var
 # =====================================================================
-def _thumb(path, size=180):
+def _thumb(path, size=220):
     from .imageutil import load_image
     img = load_image(path)
     lbl = QLabel()
     lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    lbl.setFixedSize(size, size)
-    lbl.setStyleSheet("border:1px solid #666;")
+    lbl.setFixedSize(size, round(size * 0.72))
+    lbl.setStyleSheet("background: palette(alternate-base); border: 1px solid palette(mid); border-radius: 6px;")
     if not img.isNull():
-        lbl.setPixmap(QPixmap.fromImage(img).scaled(size - 4, size - 4, Qt.AspectRatioMode.KeepAspectRatio,
+        lbl.setPixmap(QPixmap.fromImage(img).scaled(lbl.width() - 6, lbl.height() - 6,
+                                                    Qt.AspectRatioMode.KeepAspectRatio,
                                                     Qt.TransformationMode.SmoothTransformation))
     return lbl
 
@@ -719,50 +944,52 @@ class DuplicateDialog(QDialog):
 
     def __init__(self, project, src, kind, existing, remaining, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Bu fotoğraf zaten var")
+        self.setWindowTitle("Aynı fotoğraf bulundu")
         self.choice = "iptal"
         self.apply_all = False
         n_boxes = len(project.get_boxes(existing))
+        lay, foot = _dialog_layout(self, "Aynı fotoğraf bulundu")
 
         if kind == "ayni":
-            head = f"<b>{src.name}</b> projede zaten var.<br>İçerik de <b>birebir aynı</b> (aynı fotoğraf)."
+            head = f"<b>{src.name}</b> projede zaten var. İçerik de <b>birebir aynı</b> (aynı fotoğraf)."
         elif kind == "isim":
-            head = (f"<b>{src.name}</b> adında bir fotoğraf zaten var,<br>"
+            head = (f"<b>{src.name}</b> adında bir fotoğraf zaten var, "
                     f"ama <b>içerikleri farklı</b> (başka bir fotoğraf).")
         else:
-            head = (f"Bu fotoğrafın birebir aynısı projede <b>{existing}</b> adıyla zaten var.<br>"
-                    f"<span style='color:gray'>(eklemek istediğiniz: {src.name})</span>")
+            head = (f"Bu fotoğrafın birebir aynısı projede <b>{existing}</b> adıyla zaten var "
+                    f"(eklemek istediğin: {src.name}).")
         if n_boxes:
-            head += f"<br><br>Projedeki fotoğrafta <b>{n_boxes} etiket</b> var."
+            head += f"<br>Projedeki fotoğrafta <b>{n_boxes} etiket</b> var."
             if kind != "icerik":
-                head += " Değiştirirseniz etiketler korunur."
-
-        lay = QVBoxLayout(self)
-        text = QLabel(head)
-        text.setWordWrap(True)
-        lay.addWidget(text)
+                head += " Değiştirirsen etiketler korunur."
+        lay.addWidget(W.label(head, "muted", wrap=True))
 
         thumbs = QHBoxLayout()
-        for title, path in (("Projedeki", project.image_path(existing)), ("Eklenmek istenen", src)):
+        thumbs.setSpacing(10)
+        for title, path, name in (("Projedeki fotoğraf", project.image_path(existing), existing),
+                                  ("Eklenen fotoğraf", src, src.name)):
             col = QVBoxLayout()
-            col.addWidget(QLabel(f"<b>{title}</b>"), alignment=Qt.AlignmentFlag.AlignCenter)
+            col.setSpacing(5)
+            col.addWidget(W.label(title, "strong"))
             col.addWidget(_thumb(path))
+            cap = W.label(name, "small")
+            cap.setToolTip(str(path))
+            col.addWidget(cap)
             thumbs.addLayout(col)
         lay.addLayout(thumbs)
 
-        self.all_check = QCheckBox(f"Kalan {remaining} çakışma için de aynısını yap")
+        self.all_check = QCheckBox(f"Kalan {remaining} çakışmaya uygula")
         self.all_check.setVisible(remaining > 0)
         lay.addWidget(self.all_check)
 
-        row = QHBoxLayout()
         buttons = [
-            ("degistir", "Değiştir", "Projedeki fotoğrafın üstüne yaz"),
-            ("atla", "Atla", "Bu fotoğrafı ekleme"),
-            ("ekle", "Yine de ekle", "Yeni bir isimle ekle (ör. foto_1.jpg)"),
             ("iptal", "Hepsini iptal et", "Kalan dosyaların hiçbirini ekleme"),
+            ("degistir", "Değiştir", "Projedeki fotoğrafın üstüne yaz"),
+            ("ekle", "Yine de ekle", "Yeni bir isimle ekle (ör. foto_1.jpg)"),
+            ("atla", "Atla", "Bu fotoğrafı ekleme"),
         ]
-        for key, label, tip in buttons:
-            b = QPushButton(label)
+        for key, text, tip in buttons:
+            b = W.push_button(text, primary=key == "atla")
             b.setToolTip(tip)
             b.clicked.connect(lambda _=False, k=key: self._done(k))
             if key == "degistir" and kind == "icerik":
@@ -770,8 +997,11 @@ class DuplicateDialog(QDialog):
                 b.setToolTip("Aynı fotoğraf farklı isimle var, değiştirilecek bir şey yok")
             if key == "atla":
                 b.setDefault(True)
-            row.addWidget(b)
-        lay.addLayout(row)
+            else:
+                b.setAutoDefault(False)
+            foot.addWidget(b)
+            if key == "iptal":
+                foot.addStretch()
 
     def _done(self, key):
         self.choice = key
