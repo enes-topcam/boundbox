@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
 
 from . import shortcuts, theme, voice
 from . import widgets as W
+from .exporters import box_wanted
+from .panel import pretty
 from .selection import KeySelector
 
 
@@ -436,7 +438,7 @@ class ExportDialog(QDialog):
         ("voc", "Pascal VOC XML", "Fotoğraf başına XML", False),
         ("yolo", "YOLO", "TXT ve data.yaml", True),
         ("coco", "COCO JSON", "COCO biçiminde tek dosya", False),
-        ("kirp", "Kesilmiş kutular", "Her kutu ayrı, etiketsiz foto", False),
+        ("kirp", "Kesilmiş kutular", "Her etiket ayrı foto, yeni proje", False),
     ]
 
     def __init__(self, project, parent=None):
@@ -518,10 +520,20 @@ class ExportDialog(QDialog):
         prow.addWidget(self.crop_edit, 1)
         prow.addWidget(cbrowse)
         cv.addLayout(prow)
+        crow = QHBoxLayout()
+        crow.addWidget(W.label("Kesilecek etiketler", "muted"))
+        crow.addStretch()
+        self.crop_count = W.label("", "small")
+        crow.addWidget(self.crop_count)
+        cv.addSpacing(4)
+        cv.addLayout(crow)
+        self.crop_tree = self._build_crop_tree(project)
+        cv.addWidget(self.crop_tree)
         self.crop_err = W.label("", "error")
         self.crop_err.hide()
         cv.addWidget(self.crop_err)
         lay.addWidget(self.cbox)
+        self._update_crop_count()
         # ayarlara dokunulunca biçimi de işaretle (unutulmasın)
         self.pad_spin.valueChanged.connect(lambda _=None: self.checks["kirp"].setChecked(True))
         self.crop_edit.textEdited.connect(lambda _=None: self.checks["kirp"].setChecked(True))
@@ -576,6 +588,92 @@ class ExportDialog(QDialog):
         if d:
             self.out_edit.setText(d)
 
+    # ---------- kesilecek etiket seçimi (sınıf / seçenek ağacı) ----------
+    def _build_crop_tree(self, project):
+        """Sınıf → (özellik →) seçenek, hepsi işaretli. Üst kutu alttakileri izler (yarım işaretli olabilir)."""
+        tree = QTreeWidget()
+        tree.setHeaderHidden(True)
+        tree.setRootIsDecorated(True)
+        tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        tree.setProperty("framed", True)
+        tree.setIndentation(18)
+        counts = {}
+        for data in getattr(project, "annotations", {}).values():
+            for b in data["kutular"]:
+                counts[b["sinif"]] = counts.get(b["sinif"], 0) + 1
+                for a, v in b.get("attributeler", {}).items():
+                    if v:
+                        key = (b["sinif"], a, v)
+                        counts[key] = counts.get(key, 0) + 1
+        flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
+
+        def node(parent, text, n, data, tristate=False):
+            it = QTreeWidgetItem([f"{text}  ({n})" if n is not None else text])
+            it.setFlags(flags | (Qt.ItemFlag.ItemIsAutoTristate if tristate else Qt.ItemFlag.NoItemFlags))
+            it.setCheckState(0, Qt.CheckState.Checked)
+            it.setData(0, Qt.ItemDataRole.UserRole, data)
+            (parent.addChild if isinstance(parent, QTreeWidgetItem) else parent.addTopLevelItem)(it)
+            return it
+
+        rows = 0
+        for c in getattr(project, "classes", []):
+            attrs = [a for a in c["attributeler"] if a["secenekler"]]
+            top = node(tree, pretty(c["ad"]), counts.get(c["ad"], 0), ("class", c["ad"]), tristate=bool(attrs))
+            top.setIcon(0, W.dot_icon(c["renk"]))
+            rows += 1
+            for a in attrs:
+                parent = top
+                if len(attrs) > 1:      # birden çok özellik: ara başlık
+                    parent = node(top, pretty(a["ad"]), None, ("attr", c["ad"], a["ad"]), tristate=True)
+                    rows += 1
+                for v in a["secenekler"]:
+                    node(parent, pretty(v), counts.get((c["ad"], a["ad"], v), 0), ("opt", c["ad"], a["ad"], v))
+                    rows += 1
+        tree.expandAll()
+        tree.setFixedHeight(min(rows, 9) * 24 + 8)
+        tree.itemChanged.connect(lambda *_: self._on_crop_tree_changed())
+        return tree
+
+    def _on_crop_tree_changed(self):
+        self.crop_err.hide()
+        self.checks["kirp"].setChecked(True)
+        self._update_crop_count()
+
+    def crop_filter(self):
+        """None: hepsi. Yoksa {sınıf: {özellik: {seçenekler} ya da None (hepsi)}}."""
+        out, everything = {}, True
+        for i in range(self.crop_tree.topLevelItemCount()):
+            top = self.crop_tree.topLevelItem(i)
+            state = top.checkState(0)
+            if state != Qt.CheckState.Checked:
+                everything = False
+            if state == Qt.CheckState.Unchecked:
+                continue
+            cls = top.data(0, Qt.ItemDataRole.UserRole)[1]
+            attrs = {}
+            stack = [top.child(k) for k in range(top.childCount())]
+            while stack:
+                it = stack.pop()
+                data = it.data(0, Qt.ItemDataRole.UserRole)
+                if data[0] == "attr":
+                    stack.extend(it.child(k) for k in range(it.childCount()))
+                    continue
+                _, _, attr, val = data
+                attrs.setdefault(attr, {"all": True, "on": set()})
+                if it.checkState(0) == Qt.CheckState.Checked:
+                    attrs[attr]["on"].add(val)
+                else:
+                    attrs[attr]["all"] = False
+            out[cls] = {a: (None if d["all"] else d["on"]) for a, d in attrs.items()}
+        return None if everything else out
+
+    def _update_crop_count(self):
+        f = self.crop_filter()
+        n = sum(1 for d in getattr(self.p, "annotations", {}).values() for b in d["kutular"]
+                if box_wanted(f, b))
+        self.crop_count.setText(f"{n} etiket kesilecek")
+
     @staticmethod
     def _default_crop_dir(project):
         root = getattr(project, "root", None)
@@ -615,6 +713,8 @@ class ExportDialog(QDialog):
             return
         if "kirp" in self.formats():
             err = self._crop_dir_error()
+            if not err and self.crop_filter() is not None and not self.crop_filter():
+                err = "Kesilecek en az bir etiket seç."
             if err:
                 self.crop_err.setText(err)
                 self.crop_err.show()
@@ -633,8 +733,135 @@ class ExportDialog(QDialog):
             "val_percent": self.val_spin.value() if self.val_check.isChecked() else 0,
             "crop_padding": self.pad_spin.value(),
             "crop_project": self.crop_edit.text().strip(),
+            "crop_filter": self.crop_filter(),
             "limit": self.limit_spin.value() if self.limit_check.isChecked() else 0,
         }
+
+
+# =====================================================================
+#  İstatistik
+# =====================================================================
+class StatsDialog(QDialog):
+    """Genel sayılar + her sınıf / seçenek için etiket ve fotoğraf sayısı."""
+    COLS = ["Sınıf / seçenek", "Etiket", "Fotoğraf", "Fotoğrafların %'si", "Foto başına etiket"]
+
+    def __init__(self, project, parent=None):
+        super().__init__(parent)
+        self.p = project
+        self.setWindowTitle("İstatistik")
+        self.resize(760, 640)
+        lay, foot = _dialog_layout(self, f"İstatistik · {project.name}")
+
+        st = project.stats()
+        n_all = len(project.list_images())
+        n_lab = st["etiketli_resim"]
+        n_box = st["toplam_kutu"]
+        self.summary = [
+            ("Toplam fotoğraf", n_all),
+            ("Etiketli fotoğraf", n_lab),
+            ("Etiketsiz fotoğraf", n_all - n_lab),
+            ("Toplam etiket", n_box),
+            ("Foto başına etiket", f"{n_box / n_lab:.2f}".replace(".", ",") if n_lab else "–"),
+            ("Sınıf", len(project.classes)),
+        ]
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        for i, (name, value) in enumerate(self.summary):
+            card = QFrame()
+            card.setProperty("column", True)
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(12, 8, 12, 10)
+            cl.setSpacing(0)
+            cl.addWidget(W.label(name, "small"))
+            cl.addWidget(W.label(str(value), "statValue"))
+            grid.addWidget(card, i // 3, i % 3)
+        lay.addLayout(grid)
+
+        lay.addWidget(W.label("Etiket: kaç kutu çizildi · Fotoğraf: o etiketin geçtiği farklı fotoğraf sayısı "
+                              "(bir fotoğrafta 3 mercimek varsa 3 etiket, 1 fotoğraf). "
+                              "Yüzde, etiketli fotoğraflara göre.", "small", wrap=True))
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(len(self.COLS))
+        self.tree.setHeaderLabels(self.COLS)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.rows = []      # CSV için: (sınıf, özellik, seçenek, etiket, foto)
+
+        bold = QFont()
+        bold.setBold(True)
+        right = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+
+        def item(parent, text, n, photos, strong=False, dot=None):
+            pct = f"%{100 * photos / n_lab:.1f}".replace(".", ",") if n_lab else "–"
+            per = f"{n / photos:.2f}".replace(".", ",") if photos else "–"
+            it = QTreeWidgetItem([text, str(n), str(photos), pct, per])
+            for col in range(1, len(self.COLS)):
+                it.setTextAlignment(col, right)
+            if strong:
+                for col in range(len(self.COLS)):
+                    it.setFont(col, bold)
+            if dot:
+                it.setIcon(0, W.dot_icon(dot))
+            if n == 0:
+                for col in range(len(self.COLS)):
+                    it.setForeground(col, theme.qc("dim"))
+            (parent.addChild if isinstance(parent, QTreeWidgetItem) else parent.addTopLevelItem)(it)
+            return it
+
+        for cls, info in st["siniflar"].items():
+            top = item(self.tree, cls, info["toplam"], info["foto"], strong=True, dot=project.color(cls))
+            self.rows.append((cls, "", "", info["toplam"], info["foto"]))
+            multi = len(info["attr"]) > 1
+            for attr, counts in info["attr"].items():
+                parent = top
+                if multi:
+                    parent = QTreeWidgetItem([attr])
+                    parent.setForeground(0, theme.qc("dim"))
+                    top.addChild(parent)
+                for val, n in counts.items():
+                    photos = info["attr_foto"].get(attr, {}).get(val, 0)
+                    item(parent, val, n, photos)
+                    self.rows.append((cls, attr, val, n, photos))
+        self.tree.expandAll()
+        self.tree.header().setStretchLastSection(False)
+        self.tree.header().setSectionResizeMode(0, self.tree.header().ResizeMode.Stretch)
+        for col in range(1, len(self.COLS)):
+            self.tree.header().setSectionResizeMode(col, self.tree.header().ResizeMode.ResizeToContents)
+        lay.addWidget(self.tree, 1)
+
+        csv_btn = W.push_button("CSV olarak kaydet", "download", slot=self._save_csv)
+        csv_btn.setAutoDefault(False)
+        close = W.push_button("Kapat", slot=self.accept, primary=True)
+        close.setDefault(True)
+        foot.addWidget(csv_btn)
+        foot.addStretch()
+        foot.addWidget(close)
+
+    def _save_csv(self):
+        import csv
+        default = str(self.p.export_dir / f"istatistik_{datetime.now():%Y-%m-%d_%H-%M}.csv")
+        path, _ = QFileDialog.getSaveFileName(self, "İstatistiği kaydet", default, "CSV (*.csv)")
+        if not path:
+            return
+        n_lab = self.summary[1][1]
+        try:
+            # utf-8-sig + ';' → Türkçe Excel'de doğrudan düzgün açılır
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f, delimiter=";")
+                for name, value in self.summary:
+                    w.writerow([name, value])
+                w.writerow([])
+                w.writerow(["Sınıf", "Özellik", "Seçenek", "Etiket", "Fotoğraf", "Fotoğrafların %'si"])
+                for cls, attr, val, n, photos in self.rows:
+                    pct = f"{100 * photos / n_lab:.1f}".replace(".", ",") if n_lab else ""
+                    w.writerow([cls, attr, val, n, photos, pct])
+        except OSError as e:
+            QMessageBox.critical(self, "Hata", f"Kaydedilemedi:\n{e}")
+            return
+        QMessageBox.information(self, "Tamam", f"İstatistik kaydedildi:\n{path}")
 
 
 # =====================================================================

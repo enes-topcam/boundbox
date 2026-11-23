@@ -119,6 +119,7 @@ def _stylesheet(t):
     chevron = icons.file("chevron-down", t["dim"], 2)
     chevron_r = icons.file("chevron-right", t["dim"], 2)
     check = icons.file("check", "#FFFFFF", 3)
+    minus = icons.file("minus", "#FFFFFF", 3)
     radio = icons.dot_file("#FFFFFF")
     return f"""
 * {{ font-family: "{FONT_FAMILY}"; }}
@@ -141,6 +142,12 @@ QSplitter::handle:horizontal {{ width: 1px; }}
 /* ---------- yazılar ---------- */
 QLabel[role="panelTitle"] {{ font-size: 14px; font-weight: 700; }}
 QLabel[role="dialogTitle"] {{ font-size: 18px; font-weight: 700; }}
+QLabel[role="statValue"] {{ font-size: 22px; font-weight: 700; }}
+QLabel[role="cardValue"] {{ font-size: 19px; font-weight: 700; }}
+QLabel[role="countPill"] {{ background: {t['sub']}; border: 1px solid {t['line']}; border-radius: 9px;
+    padding: 0 7px; font-size: 11px; font-weight: 700; min-height: 16px; }}
+QFrame[card="true"] {{ background: {t['shell']}; border: 1px solid {t['line']}; border-radius: 8px; }}
+QFrame[card="true"] QLabel {{ background: transparent; }}
 QLabel[role="muted"] {{ color: {t['dim']}; }}
 QLabel[role="small"] {{ color: {t['dim']}; font-size: 11px; }}
 QLabel[role="count"] {{ color: {t['dim']}; font-size: 11px; }}
@@ -233,6 +240,11 @@ QCheckBox::indicator:hover, QRadioButton::indicator:hover {{ border-color: {t['a
 QCheckBox::indicator:checked {{ background: {PRIMARY}; border-color: {PRIMARY}; image: url({check}); }}
 QRadioButton::indicator:checked {{ background: {PRIMARY}; border-color: {PRIMARY}; image: url({radio}); }}
 QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{ background: {t['shell']}; border-color: {t['line']}; }}
+QTreeView::indicator {{ width: 15px; height: 15px; border: 1px solid {t['ctl']}; border-radius: 4px;
+    background: {t['surface']}; }}
+QTreeView::indicator:hover {{ border-color: {t['accent_line']}; }}
+QTreeView::indicator:checked {{ background: {PRIMARY}; border-color: {PRIMARY}; image: url({check}); }}
+QTreeView::indicator:indeterminate {{ background: {PRIMARY}; border-color: {PRIMARY}; image: url({minus}); }}
 
 /* ---------- gruplar / sekmeler ---------- */
 QGroupBox {{ border: 1px solid {t['line']}; border-radius: 7px; margin-top: 12px;

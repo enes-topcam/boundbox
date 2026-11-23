@@ -2,8 +2,8 @@ import copy
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSettings, QSize, Qt
-from PySide6.QtGui import QActionGroup, QFont, QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QSettings, QSize, Qt, QTimer
+from PySide6.QtGui import QActionGroup, QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout,
     QInputDialog, QKeySequenceEdit, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
@@ -11,10 +11,10 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import icons, shortcuts, theme, voice
+from . import icons, panel, shortcuts, theme, voice
 from . import widgets as W
 from .canvas import Canvas
-from .dialogs import DuplicateDialog, ExportDialog, LabelDialog, SettingsDialog, SetupDialog
+from .dialogs import DuplicateDialog, ExportDialog, LabelDialog, SettingsDialog, SetupDialog, StatsDialog
 from .exporters import Exporter
 from .image_list import ROLE_COUNT, ROLE_PATH, ImageList
 from .imageutil import box_label, load_image
@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         self.key_objects = []        # oluşturulan QShortcut'lar
         self.browse = None           # etikete göre gezinme: (sinif, attr, secenek) — A/D sadece onlarda gezer
         self.stats_open = set()      # istatistikte fotoğraf listesi açık olan satırlar
+        self.stats_closed = set()    # istatistikte kapatılmış sınıf kartları
 
         # ---------- sesle seçim ----------
         self.voice_missing = voice.missing_packages()
@@ -110,6 +111,20 @@ class MainWindow(QMainWindow):
         frow.setContentsMargins(10, 0, 10, 6)
         frow.addWidget(self.filter)
         ll.addLayout(frow)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Fotoğraf ara (ad)")
+        self.search.setClearButtonEnabled(True)
+        self.search.setToolTip("Adın bir kısmını ya da tamamını yaz / yapıştır. Enter: ilk sonucu aç, "
+                               "Esc: aramayı temizle.")
+        self.search_icon = self.search.addAction(icons.icon("search", theme.c("dim")),
+                                                 QLineEdit.ActionPosition.LeadingPosition)
+        self.search.textChanged.connect(lambda _: self.refresh_image_list())
+        self.search.returnPressed.connect(self._search_enter)
+        self.search.installEventFilter(self)
+        srow = QHBoxLayout()
+        srow.setContentsMargins(10, 0, 10, 6)
+        srow.addWidget(self.search)
+        ll.addLayout(srow)
         self.image_list = ImageList()
         self.image_list.emptyClicked.connect(self.on_empty_list_click)
         self.image_list.filesDropped.connect(self.handle_drop)
@@ -158,6 +173,8 @@ class MainWindow(QMainWindow):
                                       outline=True, square=True)
         self.title_label = W.label("", "strong")
         self.title_label.setMinimumWidth(60)
+        self.btn_copy_name = W.tool_button(icon="copy", tip="Fotoğrafın adını kopyala", slot=self.copy_name,
+                                           role="dim", square=True)
         self.pos_label = W.label("", "count")
         self.btn_browse = W.tool_button("", icon="x", tip="Etiket filtresini kapat (tüm fotoğraflarda gezin)",
                                         slot=self.end_browse, role="accent_ink")
@@ -172,6 +189,7 @@ class MainWindow(QMainWindow):
         top.addWidget(self.btn_next)
         top.addSpacing(4)
         top.addWidget(self.title_label)
+        top.addWidget(self.btn_copy_name)
         top.addWidget(self.pos_label)
         top.addSpacing(6)
         top.addWidget(self.btn_browse)
@@ -221,74 +239,103 @@ class MainWindow(QMainWindow):
         cl.addWidget(self.canvas, 1)
 
         # ---------- sağ: kutular + istatistik ----------
-        right = QWidget()
+        right = panel.Panel()
         right.setProperty("surface", "panel")
+        self.right_panel = right
+        self.panel_compact = False
+        self._want_scroll = False
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.setInterval(0)
+        self._fit_timer.timeout.connect(self._fit_panel)
+        right.resized.connect(self._fit_timer.start)
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(0)
-        bhead = QHBoxLayout()
-        bhead.setContentsMargins(12, 10, 12, 6)
-        bhead.addWidget(W.label("Bu fotoğraftaki kutular", "panelTitle"))
-        bhead.addStretch()
-        self.box_count = W.label("", "count")
-        bhead.addWidget(self.box_count)
-        rl.addLayout(bhead)
+        # ---------- Bu fotoğraftaki etiketler ----------
+        def section_head(icon_name, title, right=None, margins=(12, 12, 12, 8)):
+            row = QHBoxLayout()
+            row.setContentsMargins(*margins)
+            row.setSpacing(7)
+            ic = QLabel()
+            ic.setFixedSize(16, 16)
+            self.panel_icons.append((ic, icon_name))
+            row.addWidget(ic)
+            row.addWidget(W.label(title, "panelTitle"))
+            row.addStretch()
+            if right is not None:
+                row.addWidget(right)
+            return row
+
+        self.panel_icons = []
+        self.box_count = W.label("", "countPill")
+        self.box_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        rl.addLayout(section_head("tags", "Bu fotoğraftaki etiketler", self.box_count))
         self.box_list = QListWidget()
         self.box_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.box_list.setIconSize(QSize(10, 10))
-        self.box_list.setStyleSheet("QListView { margin: 0 7px; } QListView::item { padding: 5px 6px; }")
-        self.box_list.setFont(theme.ui_font(13, QFont.Weight.DemiBold))
+        self.box_list.setMouseTracking(True)
+        self.box_list.setStyleSheet("QListView { margin: 0 8px; background: transparent; }"
+                                    "QListView::item, QListView::item:hover, QListView::item:selected "
+                                    "{ background: transparent; border: 0; padding: 0; margin: 0; }")
         self.box_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.box_list.setItemDelegate(panel.BoxDelegate(
+            self.box_list, on_edit=self._edit_box_row, on_delete=self._delete_box_row,
+            color_fn=lambda c: self.project.color(c) if self.project else "#888888"))
         self.box_list.currentRowChanged.connect(self.canvas.set_selected)
         self.box_list.currentRowChanged.connect(lambda _: self._update_box_buttons())
         self.box_list.itemPressed.connect(lambda _: setattr(self, "list_active", False))
         self.box_list.itemDoubleClicked.connect(lambda _: self.edit_box(self.box_list.currentRow()))
-        self.box_empty = W.label("Bu fotoğrafta henüz kutu yok.", "muted", wrap=True)
-        self.box_empty.setContentsMargins(12, 4, 12, 4)
+        self.box_empty = W.label("Bu fotoğrafta henüz etiket yok.", "muted", wrap=True)
+        self.box_empty.setContentsMargins(12, 2, 12, 6)
         self.box_empty.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        brow = QHBoxLayout()
-        brow.setContentsMargins(10, 8, 10, 11)
-        brow.setSpacing(5)
-        self.b_edit_box = W.tool_button("Düzenle", icon="pencil", tip="Seçili kutunun etiketini düzenle",
-                                        slot=lambda: self.edit_box(self.box_list.currentRow()), outline=True)
-        self.b_del_box = W.tool_button(icon="trash-2", tip="Kutuyu sil",
-                                       slot=lambda: self.delete_box(self.box_list.currentRow()), square=True)
-        for b in (self.b_edit_box, self.b_del_box):
-            b.setIconSize(QSize(15, 15))
-        brow.addWidget(self.b_edit_box)
-        brow.addWidget(self.b_del_box)
-        brow.addStretch()
         rl.addWidget(self.box_list)
         rl.addWidget(self.box_empty)
-        rl.addLayout(brow)
+        rl.addSpacing(10)
         rl.addWidget(W.hline())
 
-        shead = QHBoxLayout()
-        shead.setContentsMargins(12, 10, 8, 2)
-        shead.addWidget(W.label("Proje istatistiği", "panelTitle"))
-        shead.addStretch()
-        stats_icon = W.tool_button(icon="list-tree", role="dim", square=True)
-        stats_icon.setToolTip("Satıra tıkla: aktif etiket yap.\nSoldaki oka tıkla: o etiketli fotoğraflar.")
-        stats_icon.setCursor(Qt.CursorShape.WhatsThisCursor)
-        shead.addWidget(stats_icon)
-        rl.addLayout(shead)
-        self.stats_summary = W.label("", "small")
-        self.stats_summary.setContentsMargins(12, 0, 12, 6)
+        # ---------- Proje istatistikleri ----------
+        stats_help = W.tool_button(icon="info", role="dim", square=True)
+        stats_help.setToolTip("Satıra tıkla: aktif etiket yap.\n"
+                              "Yemeğin solundaki oka tıkla: o etiketli fotoğraflar (A / D sadece onlarda gezer).\n"
+                              "Sınıfın sağındaki ok: kartı aç / kapat.\n\n"
+                              "Etiket: çizilen her işaretleme. Fotoğraf: o etiketin geçtiği farklı fotoğraf sayısı\n"
+                              "(bir fotoğrafta 3 mercimek varsa 3 etiket, 1 fotoğraf).")
+        stats_help.setCursor(Qt.CursorShape.WhatsThisCursor)
+        rl.addLayout(section_head("chart-column", "Proje istatistikleri", stats_help, (12, 12, 8, 8)))
+        cards = QHBoxLayout()
+        cards.setContentsMargins(10, 0, 10, 0)
+        cards.setSpacing(8)
+        self.card_boxes = panel.SummaryCard("tags", "Toplam etiket", "Fotoğraflardaki bütün işaretlemeler", short="etiket")
+        self.card_photos = panel.SummaryCard("image", "Etiketli fotoğraf",
+                                             "En az bir etiketi olan fotoğraflar (her fotoğraf bir kez sayılır)",
+                                             short="fotoğraf")
+        cards.addWidget(self.card_boxes, 1)
+        cards.addWidget(self.card_photos, 1)
+        rl.addLayout(cards)
+        self.stats_summary = W.label("", "small", wrap=True)
+        self.stats_summary.setContentsMargins(13, 6, 12, 2)
         rl.addWidget(self.stats_summary)
         self.stats_tree = QTreeWidget()
         self.stats_tree.setHeaderHidden(True)
         self.stats_tree.setColumnCount(1)
-        self.stats_tree.setIndentation(14)
+        self.stats_tree.setIndentation(0)
+        self.stats_tree.setRootIsDecorated(False)
+        self.stats_tree.setExpandsOnDoubleClick(False)
         self.stats_tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.stats_tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.stats_tree.setMouseTracking(True)
         self.stats_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.stats_tree.setItemDelegate(W.StatsDelegate(self.stats_tree))
-        self.stats_tree.setStyleSheet("QTreeView { margin-left: 4px; }")
+        self.stats_tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.stats_delegate = panel.StatsDelegate(self.stats_tree)
+        self.stats_tree.setItemDelegate(self.stats_delegate)
+        self.stats_tree.setStyleSheet("QTreeView { margin: 0 6px 6px 6px; background: transparent; }"
+                                      "QTreeView::item, QTreeView::item:hover { background: transparent; "
+                                      "padding: 0; }")
         self.stats_tree.itemClicked.connect(self._on_stats_clicked)
         self.stats_tree.itemExpanded.connect(self._on_stats_expanded)
         self.stats_tree.itemCollapsed.connect(self._on_stats_collapsed)
         rl.addWidget(self.stats_tree, 2)
+        self._refresh_panel_icons()
 
         split = QSplitter()
         split.setHandleWidth(1)
@@ -297,8 +344,8 @@ class MainWindow(QMainWindow):
         split.addWidget(center)
         split.addWidget(right)
         left.setMinimumWidth(190)
-        right.setMinimumWidth(240)
-        split.setSizes([232, 880, 300])
+        right.setMinimumWidth(260)
+        split.setSizes([232, 840, 340])
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
         split.setStretchFactor(2, 0)
@@ -349,7 +396,16 @@ class MainWindow(QMainWindow):
     def _on_theme_changed(self):
         self._show_theme(self.settings.value("tema", "sistem"))
         self._update_active_label()
+        self._refresh_panel_icons()
         self.stats_tree.viewport().update()
+        self.box_list.viewport().update()
+
+    def _refresh_panel_icons(self):
+        self.search_icon.setIcon(icons.icon("search", theme.c("dim")))
+        for lb, name in self.panel_icons:
+            lb.setPixmap(icons.icon(name, theme.c("dim")).pixmap(16, 16))
+        self.card_boxes.refresh_icon()
+        self.card_photos.refresh_icon()
 
     def _build_toolbar(self):
         tb = self.addToolBar("Araçlar")
@@ -437,6 +493,9 @@ class MainWindow(QMainWindow):
         self.theme_btn.setMenu(menu)
         tb.addWidget(self.theme_btn)
 
+        self.btn_stats = W.tool_button("İstatistik", icon="chart-column", tip="İstatistik",
+                                       slot=self.open_stats)
+        tb.addWidget(self.btn_stats)
         self.btn_settings = W.tool_button(icon="settings", tip="Ayarlar", slot=lambda: self.open_settings(),
                                           square=True)
         tb.addWidget(self.btn_settings)
@@ -476,9 +535,9 @@ class MainWindow(QMainWindow):
 
     def _update_enabled(self):
         on = self.project is not None
-        for w in (self.btn_setup, self.btn_add, self.a_refresh, self.btn_import, self.btn_export,
+        for w in (self.btn_setup, self.btn_add, self.a_refresh, self.btn_import, self.btn_export, self.btn_stats,
                   self.a_open_dir, self.btn_settings, self.btn_fit, self.btn_del_img,
-                  self.btn_prev, self.btn_next, self.mic_btn):
+                  self.btn_prev, self.btn_next, self.mic_btn, self.search, self.btn_copy_name):
             w.setEnabled(on)
         self._update_project_button()
         if not on:
@@ -514,7 +573,8 @@ class MainWindow(QMainWindow):
             "sigdir": self.canvas.fit, "foto_sil": self.delete_images,
             "kutu_sil": self.delete_selected_box, "geri_al": self.undo,
             "iptal": self.canvas.cancel, "sifirla": self.clear_selection,
-            "disa_aktar": self.export, "yenile": self.reload_project,
+            "disa_aktar": self.export, "istatistik": self.open_stats, "yenile": self.reload_project,
+            "ara": self.focus_search, "ad_kopyala": self.copy_name,
             "ses_ac_kapat": self.toggle_voice,
         }
         for k, fn in actions.items():
@@ -531,8 +591,9 @@ class MainWindow(QMainWindow):
                 bind(key, lambda k=key: self.on_label_key(k))
 
         tips = {"onceki": self.btn_prev, "sonraki": self.btn_next, "sigdir": self.btn_fit,
-                "foto_sil": self.btn_del_img, "kutu_sil": self.b_del_box, "sifirla": self.btn_clear_sel,
-                "disa_aktar": self.btn_export}
+                "foto_sil": self.btn_del_img, "sifirla": self.btn_clear_sel,
+                "disa_aktar": self.btn_export, "istatistik": self.btn_stats,
+                "ad_kopyala": self.btn_copy_name}
         for k, btn in tips.items():
             base = btn.toolTip().split("  (")[0]
             btn.setToolTip(base + (f"  ({g[k]})" if g[k] else ""))
@@ -571,6 +632,8 @@ class MainWindow(QMainWindow):
     def _selection_changed(self):
         self._update_active_label()
         self.refresh_stats()
+        self._want_scroll = True
+        self._fit_timer.start()
 
     def _update_active_label(self):
         """Çizim satırındaki aktif etiket rozeti: Hazır / ... seç / Etiket seçilmedi."""
@@ -914,6 +977,15 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, ev):
         t = ev.type()
+        if obj is getattr(self, "search", None) and ev.type() in (QEvent.Type.ShortcutOverride,
+                                                                   QEvent.Type.KeyPress) \
+                and ev.key() == Qt.Key.Key_Escape:
+            if t == QEvent.Type.ShortcutOverride:   # Esc "çizimi iptal et" kısayoluna gitmesin
+                ev.accept()
+                return True
+            self.search.clear()
+            self.canvas.setFocus()
+            return True
         if t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             release = t == QEvent.Type.KeyRelease
             if self.ptt_held and release and self._ptt_match(ev, True):
@@ -1130,6 +1202,7 @@ class MainWindow(QMainWindow):
         select = select or self.current
         self.images = self.project.list_images()
         mode = self.filter.currentIndex()
+        query = self._search_query()
         self.image_list.blockSignals(True)
         self.image_list.clear()
         labeled = 0
@@ -1137,6 +1210,8 @@ class MainWindow(QMainWindow):
             n = len(self.project.get_boxes(name))
             labeled += n > 0
             if (mode == 1 and not n) or (mode == 2 and n):
+                continue
+            if query and query not in name.lower():
                 continue
             it = QListWidgetItem(name)
             it.setData(Qt.ItemDataRole.UserRole, name)
@@ -1146,10 +1221,13 @@ class MainWindow(QMainWindow):
             self.image_list.addItem(it)
         self.image_list.blockSignals(False)
         self._update_progress(labeled)
-        self.image_list.placeholder = "Fotoğraf ekle veya bırak" if not self.images else "Bu filtrede fotoğraf yok"
+        if query:
+            self.photo_count.setText(f"{self.image_list.count()} / {len(self.images)}")
+        empty = "Aramayla eşleşen fotoğraf yok" if query else "Bu filtrede fotoğraf yok"
+        self.image_list.placeholder = "Fotoğraf ekle veya bırak" if not self.images else empty
         self.image_list.viewport().update()
         if self.images:
-            self.canvas.set_empty("Bu filtrede fotoğraf yok")
+            self.canvas.set_empty(empty)
         else:
             self.canvas.set_empty("Henüz fotoğraf eklenmedi", "Fotoğraf ekle")
 
@@ -1164,7 +1242,8 @@ class MainWindow(QMainWindow):
             self.current_image = None
             self.boxes = []
             self.canvas.set_image(None, [])
-            self.title_label.setText("Fotoğraf yok" if not self.images else "Bu filtrede fotoğraf yok")
+            self.title_label.setText("Fotoğraf yok" if not self.images else empty)
+            self.btn_copy_name.setEnabled(False)
             self.pos_label.setText("")
             self.btn_prev.setEnabled(False)
             self.btn_next.setEnabled(False)
@@ -1205,6 +1284,7 @@ class MainWindow(QMainWindow):
         fm = self.title_label.fontMetrics()
         self.title_label.setText(fm.elidedText(name, Qt.TextElideMode.ElideMiddle, 320))
         self.title_label.setToolTip(name)
+        self.btn_copy_name.setEnabled(True)
         if self.browse:
             # etikete göre gezinme: sıra o etiketli fotoğraflar içinde
             names = [n for n, _ in self._photos_for(self.browse)]
@@ -1218,6 +1298,30 @@ class MainWindow(QMainWindow):
             self.pos_label.setText(f"{row + 1} / {self.image_list.count()}")
             self.btn_prev.setEnabled(row > 0)
             self.btn_next.setEnabled(row < self.image_list.count() - 1)
+
+    # ---------- fotoğraf adı: kopyala / ara ----------
+    def _copy_text(self, text):
+        QApplication.clipboard().setText(text)
+        shown = text if "\n" not in text else f"{text.count(chr(10)) + 1} fotoğraf adı"
+        self.statusBar().showMessage(f"Kopyalandı: {shown}", 3000)
+
+    def copy_name(self):
+        if self.current:
+            self._copy_text(self.current)
+
+    def _search_query(self):
+        """Aranan metin (büyük / küçük harf fark etmez, kopyalarken gelen tırnak ve boşluklar atılır)."""
+        return self.search.text().strip().strip("'\"").strip().lower()
+
+    def focus_search(self):
+        self.search.setFocus()
+        self.search.selectAll()
+
+    def _search_enter(self):
+        if self.image_list.count():
+            self.image_list.setCurrentRow(0)
+            self.image_list.scrollToItem(self.image_list.item(0))
+        self.canvas.setFocus()
 
     def step(self, d):
         if self.browse:
@@ -1239,10 +1343,16 @@ class MainWindow(QMainWindow):
             self.image_list.setCurrentItem(item)
         names = self._selected_names()
         m = QMenu(self)
+        a_copy = m.addAction("Adı kopyala" if len(names) == 1 else f"{len(names)} fotoğrafın adını kopyala")
+        W.set_icon(a_copy, "copy")
+        m.addSeparator()
         text = "🗑 Sil" if len(names) == 1 else f"🗑 Seçili {len(names)} fotoğrafı sil"
         a_del = m.addAction(text)
-        if m.exec(self.image_list.viewport().mapToGlobal(pos)) == a_del:
+        chosen = m.exec(self.image_list.viewport().mapToGlobal(pos))
+        if chosen == a_del:
             self.delete_images(names)
+        elif chosen == a_copy:
+            self._copy_text("\n".join(names))
 
     def _selected_names(self):
         names = [it.data(Qt.ItemDataRole.UserRole) for it in self.image_list.selectedItems()]
@@ -1396,6 +1506,14 @@ class MainWindow(QMainWindow):
         self._save()
         self.box_list.setCurrentRow(i)
 
+    def _edit_box_row(self, i):
+        self.box_list.setCurrentRow(i)
+        self.edit_box(i)
+
+    def _delete_box_row(self, i):
+        self.box_list.setCurrentRow(i)
+        self.delete_box(i)
+
     def delete_box(self, i):
         if not (0 <= i < len(self.boxes)):
             return
@@ -1426,25 +1544,86 @@ class MainWindow(QMainWindow):
         self.box_list.blockSignals(True)
         self.box_list.clear()
         for b in self.boxes if self.project else []:
-            it = QListWidgetItem(W.dot_icon(self.project.color(b["sinif"])), box_label(b))
-            it.setToolTip(box_label(b))
+            it = QListWidgetItem(box_label(b))
+            it.setData(Qt.ItemDataRole.UserRole, b)
+            it.setToolTip(box_label(b) + "\nTıkla: seç · Çift tıkla: düzenle")
             self.box_list.addItem(it)
         self.box_list.blockSignals(False)
         self.canvas.set_selected(-1)
         n = self.box_list.count()
-        # liste içeriği kadar uzasın (en fazla 7 satır), kalan yer istatistiğe kalsın
-        row_h = self.box_list.sizeHintForRow(0) if n else 30
-        self.box_list.setFixedHeight(min(max(n, 1), 7) * (row_h + 2) + 6)
+        # liste içeriği kadar uzasın (en fazla 5 satır), kalan yer istatistiğe kalsın
+        self._size_box_list()
         self.box_count.setText(str(n) if self.current else "")
+        self.box_count.setVisible(bool(self.current))
         self.box_list.setVisible(n > 0)
         self.box_empty.setVisible(n == 0)
-        self.box_empty.setText("Bu fotoğrafta henüz kutu yok." if self.current else "Açık fotoğraf yok.")
+        self.box_empty.setText("Bu fotoğrafta henüz etiket yok." if self.current else "Açık fotoğraf yok.")
         self._update_box_buttons()
 
     def _update_box_buttons(self):
-        on = 0 <= self.box_list.currentRow() < self.box_list.count()
-        self.b_edit_box.setEnabled(on)
-        self.b_del_box.setEnabled(on)
+        self.box_list.viewport().update()
+
+    def _size_box_list(self):
+        """Etiket listesi içeriği kadar uzasın (en fazla 5 satır), kalan yer istatistiğe kalsın."""
+        n = self.box_list.count()
+        self.box_list.setFixedHeight(min(max(n, 1), 5) * self.box_list.itemDelegate().row_h + 2)
+        self._fit_timer.start()
+
+    # ---------- sağ panel: önce sığdır, sığmazsa seçili etikete kaydır ----------
+    def _set_compact(self, on):
+        if on == self.panel_compact:
+            return
+        self.panel_compact = on
+        self.stats_delegate.compact = on
+        self.box_list.itemDelegate().compact = on
+        self.card_boxes.set_compact(on)
+        self.card_photos.set_compact(on)
+        self.stats_summary.setVisible(not on)
+        n = self.box_list.count()
+        self.box_list.setFixedHeight(min(max(n, 1), 5) * self.box_list.itemDelegate().row_h + 2)
+        self.box_list.doItemsLayout()
+        self.stats_tree.doItemsLayout()
+
+    def _stats_need(self):
+        """İstatistik ağacının kaydırmadan sığması için gereken yükseklik."""
+        need = 0
+        stack = [self.stats_tree.topLevelItem(i) for i in range(self.stats_tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            need += self.stats_delegate.row_height(item.data(0, W.ROLE_KIND))
+            if item.isExpanded():
+                stack.extend(item.child(i) for i in range(item.childCount()))
+        return need + 4
+
+    def _fit_panel(self):
+        if not self.project:
+            return
+        for compact in (False, True):
+            self._set_compact(compact)
+            self.right_panel.layout().activate()
+            if self._stats_need() <= self.stats_tree.viewport().height():
+                break
+        if self._want_scroll:
+            self._want_scroll = False
+            self._scroll_to_active()
+
+    def _scroll_to_active(self):
+        """Kısayolla / sesle seçilen etiket görünmüyorsa istatistik oraya kayar."""
+        items = self._stats_items()
+        target = next((i for i in items if i.data(0, W.ROLE_STATE) in ("active", "pending")), None)
+        if target is None:
+            return
+        tree = self.stats_tree
+        cls_item = target
+        while cls_item.parent():
+            cls_item = cls_item.parent()
+        if target is cls_item and cls_item.isExpanded() and cls_item.childCount():
+            # sınıf seçildi, seçenek bekleniyor: kartın tamamı görünsün (sığmıyorsa başlığı)
+            last = cls_item.child(cls_item.childCount() - 1)
+            tree.scrollToItem(last, QAbstractItemView.ScrollHint.EnsureVisible)
+            tree.scrollToItem(cls_item, QAbstractItemView.ScrollHint.EnsureVisible)
+        else:
+            tree.scrollToItem(target, QAbstractItemView.ScrollHint.EnsureVisible)
 
     def _refresh_current_list_item(self):
         it = self.image_list.currentItem()
@@ -1461,11 +1640,22 @@ class MainWindow(QMainWindow):
         if not self.project:
             return
         st = self.project.stats()
-        self.stats_summary.setText(f"{st['toplam_kutu']} kutu · {st['etiketli_resim']} etiketli fotoğraf")
+        self.card_boxes.set_value(st["toplam_kutu"])
+        self.card_photos.set_value(st["etiketli_resim"])
+        n_all = len(self.images)
+        self.stats_summary.setText(f"{n_all} fotoğrafın {st['etiketli_resim']} tanesi etiketli · "
+                                   "fotoğraflar tekil sayılır")
         sel = self.sel
+        self.stats_delegate.set_names(
+            list(st["siniflar"]), [v for i in st["siniflar"].values() for cnt in i["attr"].values() for v in cnt])
+        big = max([1] + [i["toplam"] for i in st["siniflar"].values()])
+        big_photo = max([1] + [i["foto"] for i in st["siniflar"].values()])
+        self.stats_delegate.count_digits = len(str(big))
+        self.stats_delegate.photo_digits = len(str(big_photo))
 
-        def row(kind, text, data, count=None, key="", dot=None, state=None):
+        def row(kind, text, data, count=None, key="", dot=None, state=None, photos=None):
             it = QTreeWidgetItem([text])
+            it.setData(0, W.ROLE_PHOTOS, photos)
             it.setData(0, Qt.ItemDataRole.UserRole, data)
             it.setData(0, W.ROLE_KIND, kind)
             it.setData(0, W.ROLE_COUNT, count)
@@ -1475,11 +1665,14 @@ class MainWindow(QMainWindow):
             return it
 
         for cls, info in st["siniflar"].items():
+            total = info["toplam"]
             c = self.project.get_class(cls) or {}
             on = bool(sel and sel.cls == cls)
             top = row("class", cls, (cls, None, None), info["toplam"], c.get("kisayol", ""),
-                      self.project.color(cls), "active" if on and not sel.attrs else None)
-            top.setToolTip(0, f"{cls}\nTıkla: aktif etiket yap")
+                      self.project.color(cls), "active" if on and not sel.attrs else None,
+                      photos=info["foto"])
+            top.setToolTip(0, f"{cls}\n{info['toplam']} etiket · {info['foto']} fotoğraf\nTıkla: aktif etiket yap")
+            top.setData(0, W.ROLE_EXPANDABLE, bool(info["attr"]))
             if not info["attr"]:                     # seçeneksiz sınıf: fotoğraflar doğrudan altında
                 self._make_photo_owner(top, (cls, None, None), info["toplam"])
             flat = len(info["attr"]) == 1            # tek özellik: seçenekler doğrudan sınıfın altında
@@ -1493,17 +1686,19 @@ class MainWindow(QMainWindow):
                                  state="pending" if waiting else None)
                     top.addChild(parent)
                 for val, n in counts.items():
+                    n_photo = info["attr_foto"].get(attr, {}).get(val, 0)
                     chosen = on and sel.attrs.get(attr) == val
                     # tam tuş sırası: önce sınıfın tuşu, sonra seçeneğin (ör. 1 sonra 2)
                     cls_key, opt_key = c.get("kisayol", ""), keys.get(val, "")
                     v_item = row("option", val, (cls, attr, val), n,
                                  f"{cls_key}\t{opt_key}" if cls_key and opt_key else "",
-                                 state="active" if chosen else ("zero" if n == 0 else None))
-                    v_item.setToolTip(0, f"{cls} › {val}\nTıkla: aktif etiket yap")
+                                 state="active" if chosen else ("zero" if n == 0 else None), photos=n_photo)
+                    v_item.setData(0, W.ROLE_SHARE, n / total if total else 0)
+                    v_item.setToolTip(0, f"{cls} › {val}\n{n} etiket · {n_photo} fotoğraf\nTıkla: aktif etiket yap")
                     self._make_photo_owner(v_item, (cls, attr, val), n)
                     parent.addChild(v_item)
             self.stats_tree.addTopLevelItem(top)
-            if info["attr"]:
+            if info["attr"] and cls not in self.stats_closed:
                 top.setExpanded(True)
                 for i in range(top.childCount()):
                     if top.child(i).data(0, W.ROLE_KIND) == "attr":
@@ -1516,8 +1711,16 @@ class MainWindow(QMainWindow):
         self.stats_tree.verticalScrollBar().setValue(scroll)
         if self.browse:
             self._update_title()
+        self._fit_timer.start()
 
     def _on_stats_clicked(self, item, _col):
+        kind = item.data(0, W.ROLE_KIND)
+        if item.data(0, W.ROLE_EXPANDABLE):
+            pos = self.stats_tree.viewport().mapFromGlobal(QCursor.pos())
+            area = self.stats_delegate.chevron_rect(kind, self.stats_tree.visualItemRect(item))
+            if area.contains(pos.toPointF()):
+                item.setExpanded(not item.isExpanded())
+                return
         photo = item.data(0, ROLE_PHOTO)
         if photo:
             return self.start_browse(item.parent().data(0, ROLE_KEY), photo)
@@ -1535,6 +1738,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _make_photo_owner(item, key, n):
         item.setData(0, ROLE_KEY, key)
+        item.setData(0, W.ROLE_EXPANDABLE, bool(n))
         if n:
             item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
             item.setToolTip(0, "Soldaki oka tıkla: bu etiketli fotoğraflar.\n"
@@ -1566,6 +1770,9 @@ class MainWindow(QMainWindow):
         return out
 
     def _on_stats_expanded(self, item):
+        self._fit_timer.start()
+        if item.data(0, W.ROLE_KIND) == "class":
+            self.stats_closed.discard(item.text(0))
         key = item.data(0, ROLE_KEY)
         if not key or not self.project:
             return
@@ -1585,6 +1792,9 @@ class MainWindow(QMainWindow):
         self._mark_current_photo(scroll=False)
 
     def _on_stats_collapsed(self, item):
+        self._fit_timer.start()
+        if item.data(0, W.ROLE_KIND) == "class" and not item.data(0, ROLE_KEY):
+            self.stats_closed.add(item.text(0))
         key = item.data(0, ROLE_KEY)
         if key:
             self.stats_open.discard(key)
@@ -1611,6 +1821,9 @@ class MainWindow(QMainWindow):
             return next((i for i in range(self.image_list.count())
                          if self.image_list.item(i).data(Qt.ItemDataRole.UserRole) == name), None)
         row = row_of()
+        if row is None and self.search.text():
+            self.search.clear()
+            row = row_of()
         if row is None and self.filter.currentIndex() != 0:
             self.filter.setCurrentIndex(0)
             row = row_of()
@@ -1702,6 +1915,10 @@ class MainWindow(QMainWindow):
         self.refresh_image_list(select=self.current)
         self.refresh_stats()
         QMessageBox.information(self, "Tamam", f"{n_boxes} kutu içe aktarıldı.")
+
+    def open_stats(self):
+        if self.project:
+            StatsDialog(self.project, self).exec()
 
     def export(self):
         dlg = ExportDialog(self.project, self)

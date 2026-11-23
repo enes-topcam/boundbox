@@ -375,21 +375,38 @@ class Project:
 
     # ---------- istatistik ----------
     def stats(self):
-        """{"toplam_kutu", "etiketli_resim", "siniflar": {sinif: {"toplam", "attr": {attr: {secenek: n}}}}}"""
+        """Etiket (kutu) ve fotoğraf sayıları.
+
+        {"toplam_kutu", "etiketli_resim",
+         "siniflar": {sinif: {"toplam", "foto", "attr": {attr: {secenek: n}},
+                              "attr_foto": {attr: {secenek: foto_sayisi}}}}}
+        "foto": o etiketin en az bir kez geçtiği farklı fotoğraf sayısı
+        (bir fotoğrafta 3 mercimek varsa 3 etiket, 1 fotoğraf)."""
         result = {"toplam_kutu": 0, "etiketli_resim": len(self.annotations), "siniflar": {}}
+
+        def entry(cls, attr_defs=()):
+            return {"toplam": 0, "foto": 0,
+                    "attr": {a["ad"]: {v: 0 for v in a["secenekler"]} for a in attr_defs},
+                    "attr_foto": {a["ad"]: {v: 0 for v in a["secenekler"]} for a in attr_defs}}
+
         for c in self.classes:
-            result["siniflar"][c["ad"]] = {
-                "toplam": 0,
-                "attr": {a["ad"]: {v: 0 for v in a["secenekler"]} for a in c["attributeler"]},
-            }
+            result["siniflar"][c["ad"]] = entry(c["ad"], c["attributeler"])
         for data in self.annotations.values():
+            seen_cls, seen_opt = set(), set()
             for b in data["kutular"]:
                 result["toplam_kutu"] += 1
-                s = result["siniflar"].setdefault(b["sinif"], {"toplam": 0, "attr": {}})
+                s = result["siniflar"].setdefault(b["sinif"], entry(b["sinif"]))
                 s["toplam"] += 1
+                seen_cls.add(b["sinif"])
                 for attr_name, counts in s["attr"].items():
                     val = b.get("attributeler", {}).get(attr_name) or "(seçilmemiş)"
                     counts[val] = counts.get(val, 0) + 1
+                    seen_opt.add((b["sinif"], attr_name, val))
+            for cls in seen_cls:
+                result["siniflar"][cls]["foto"] += 1
+            for cls, attr_name, val in seen_opt:
+                photos = result["siniflar"][cls]["attr_foto"][attr_name]
+                photos[val] = photos.get(val, 0) + 1
         return result
 
 

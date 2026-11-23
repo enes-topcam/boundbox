@@ -11,6 +11,7 @@ Fotoğraflara dikdörtgen kutu çizip sınıf ve özellik (attribute) atamak iç
 - Açık / koyu tema (sağ üstten seçilir, "Sistem" Windows ayarını takip eder)
 - Sesle seçim: "mercimek çorbası" de, corba → mercimek seçilsin; sen sadece kutuyu çiz
 - Etikete göre gezinme: sağdaki istatistikte bir seçeneğin (ör. `mercimek`) solundaki oka tıkla, o etiketli fotoğraflar açılsın; birine tıklayınca A / D sadece onlarda gezer (üstteki "… filtresi ×" göstergesiyle biter)
+- İstatistik: her sınıf ve seçenek için **etiket** sayısının yanında **fotoğraf** sayısı (bir fotoğrafta 3 mercimek varsa 3 etiket, 1 fotoğraf). Üstteki **İstatistik** düğmesi (Ctrl+I) toplam / etiketli / etiketsiz fotoğraf, toplam etiket ve tüm tabloyu gösterir, CSV olarak kaydedilebilir (Excel'de açılır)
 - Sade, iki temalı arayüz: küçük resimli fotoğraf listesi, aktif etiket rozeti (Hazır / … seç), istatistikte her etiketin kısayolu
 
 ## Kurulum
@@ -50,6 +51,9 @@ Windows'ta `baslat.bat` dosyasına çift tıklayarak da açabilirsin.
 | Shift + tık | Kutunun kenarından yeni kutu başlat (düzeltme yerine) |
 | X | Seçimi sıfırla |
 | Ctrl+E | Dışa aktar |
+| Ctrl+I | İstatistik penceresi |
+| Ctrl+F | Fotoğraf ara (soldaki arama kutusu; Enter ilk sonucu açar, Esc temizler) |
+| Ctrl+Shift+C | Açık fotoğrafın adını kopyala (üstteki ad yanındaki düğme de olur) |
 | F5 | Yenile |
 
 Kısayollar program içinden değiştirilebilir.

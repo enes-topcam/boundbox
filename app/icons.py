@@ -40,6 +40,13 @@ _PATHS = {
     "x": '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
     "chevron-down": '<path d="m6 9 6 6 6-6"/>',
     "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
+    "image": '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>',
+    "info": '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+    "copy": '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+    "search": '<path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/>',
+    "minus": '<path d="M5 12h14"/>',
+    "chevron-up": '<path d="m18 15-6-6-6 6"/>',
+    "chart-column": '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
 }
 
 _icons = {}

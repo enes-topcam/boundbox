@@ -3,8 +3,8 @@ import shiboken6
 from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractButton, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QStyle,
-    QStyledItemDelegate, QToolButton, QWidget,
+    QAbstractButton, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
+    QToolButton, QWidget,
 )
 
 from . import icons, theme
@@ -252,106 +252,10 @@ ROLE_KIND = Qt.ItemDataRole.UserRole + 10    # "class" | "attr" | "option" | "ph
 ROLE_DOT = Qt.ItemDataRole.UserRole + 11     # sınıf rengi
 ROLE_KBD = Qt.ItemDataRole.UserRole + 12     # kısayol
 ROLE_COUNT = Qt.ItemDataRole.UserRole + 13   # sağdaki sayı
+ROLE_PHOTOS = Qt.ItemDataRole.UserRole + 15  # kaç farklı fotoğrafta geçtiği (None: gösterme)
+ROLE_SHARE = Qt.ItemDataRole.UserRole + 16   # seçeneğin sınıf içindeki payı (0..1), dağılım çubuğu
+ROLE_EXPANDABLE = Qt.ItemDataRole.UserRole + 17  # açılabilir mi (fotoğraf listesi / sınıf kartı)
 ROLE_STATE = Qt.ItemDataRole.UserRole + 14   # "active" | "pending" | "zero" | "current" | "browse" | None
-
-
-class StatsDelegate(QStyledItemDelegate):
-    ROW_H = 28
-
-    def sizeHint(self, option, index):
-        kind = index.data(ROLE_KIND)
-        return QSize(option.rect.width(), 22 if kind == "attr" else self.ROW_H)
-
-    def paint(self, p, option, index):
-        p.save()
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        r = QRectF(option.rect).adjusted(1, 1, -4, -1)
-        kind = index.data(ROLE_KIND)
-        state = index.data(ROLE_STATE)
-        hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
-
-        if state in ("active", "browse"):
-            p.setPen(QPen(theme.qc("accent_line"), 1))
-            p.setBrush(theme.qc("accent_soft"))
-            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 6, 6)
-        elif state == "pending":
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(theme.qc("warn_bg"))
-            p.drawRoundedRect(r, 6, 6)
-        elif state == "current":
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(theme.qc("sub"))
-            p.drawRoundedRect(r, 6, 6)
-        elif hover and kind != "attr":
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(theme.qc("sub"))
-            p.drawRoundedRect(r, 6, 6)
-
-        x = r.left() + 6
-        cy = r.center().y()
-        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
-        color = index.data(ROLE_DOT)
-        if color:
-            p.setPen(QPen(QColor(23, 36, 53, 40), 1))
-            p.setBrush(QColor(color))
-            p.drawRoundedRect(QRectF(x, cy - 5, 10, 10), 3, 3)
-            x += 17
-
-        count = index.data(ROLE_COUNT)
-        count_text = "" if count is None else str(count)
-        f_count = theme.ui_font(12, QFont.Weight.Normal)
-        p.setFont(f_count)
-        count_w = p.fontMetrics().horizontalAdvance(count_text) + 6 if count_text else 0
-
-        if kind == "attr":
-            f = theme.ui_font(11, QFont.Weight.DemiBold)
-            p.setFont(f)
-            p.setPen(theme.qc("warn") if state == "pending" else theme.qc("dim"))
-        elif kind == "photo":
-            f = theme.ui_font(12, QFont.Weight.DemiBold if state in ("current", "browse") else QFont.Weight.Normal)
-            p.setFont(f)
-            p.setPen(theme.qc("accent_ink") if state == "browse" else theme.qc("ink"))
-        else:
-            weight = QFont.Weight.Bold if kind == "class" else QFont.Weight.DemiBold
-            f = theme.ui_font(13 if kind == "class" else 12, weight)
-            p.setFont(f)
-            if state == "active":
-                p.setPen(theme.qc("accent_ink"))
-            elif state == "zero":
-                p.setPen(theme.qc("dim"))
-            else:
-                p.setPen(theme.qc("ink"))
-        fm = p.fontMetrics()
-        name_font = p.font()
-        name_pen = p.pen()
-        # "Kısayol [1] [2]": sınıf tuşu, sonra seçenek tuşu (sekmeyle ayrılmış)
-        keys = [k for k in (index.data(ROLE_KBD) or "").split("\t") if k]
-        f_key = theme.ui_font(11)
-        key_label_w = QFontMetrics(f_key).horizontalAdvance("Kısayol")
-        key_w = (key_label_w + 5 + sum(theme_mono_width(k) + 13 for k in keys) + 8) if keys else 0
-        avail = r.right() - x - count_w - key_w - 8
-        shown = fm.elidedText(text, Qt.TextElideMode.ElideRight, max(10, int(avail)))
-        p.setFont(name_font)
-        p.setPen(name_pen)
-        p.drawText(QRectF(x, r.top(), avail, r.height()),
-                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, shown)
-        x += fm.horizontalAdvance(shown) + 8
-        if keys:
-            p.setFont(f_key)
-            p.setPen(theme.qc("dim"))
-            p.drawText(QRectF(x, r.top(), key_label_w + 2, r.height()),
-                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "Kısayol")
-            x += key_label_w + 5
-            for k in keys:
-                x += draw_kbd(p, x, cy, k) + 3
-
-        if count_text:
-            p.setFont(f_count)
-            p.setPen(theme.qc("danger") if state == "zero" else theme.qc("dim") if kind == "photo"
-                     else theme.qc("ink"))
-            p.drawText(QRectF(r.right() - count_w - 6, r.top(), count_w, r.height()),
-                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, count_text)
-        p.restore()
 
 
 def theme_mono_width(text):

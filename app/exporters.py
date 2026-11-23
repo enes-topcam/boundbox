@@ -30,7 +30,7 @@ def _sub(parent, tag, text=None, **attrs):
 
 class Exporter:
     def __init__(self, project, out_dir, only_labeled=True, copy_images=True,
-                 yolo_mode="sinif", val_percent=0, crop_padding=6, crop_project=None, limit=0,
+                 yolo_mode="sinif", val_percent=0, crop_padding=6, crop_project=None, crop_filter=None, limit=0,
                  progress=None):
         self.p = project
         self.out = Path(out_dir)
@@ -39,6 +39,7 @@ class Exporter:
         self.val_percent = val_percent
         self.crop_padding = crop_padding    # kesilen kutunun her kenarına eklenen piksel
         self.crop_project = crop_project    # kesitlerden oluşturulacak yeni proje klasörü
+        self.crop_filter = crop_filter      # None: bütün etiketler; yoksa box_wanted'a bakın
         self.crop_count = 0
         self.progress = progress or (lambda text: None)
         self.warnings = []
@@ -300,12 +301,14 @@ class Exporter:
         for n, img in enumerate(self.images, start=1):
             self.progress(f"Kutular kesiliyor... {n}/{len(self.images)}")
             boxes = self.p.get_boxes(img)
-            if not boxes:
+            if not any(box_wanted(self.crop_filter, b) for b in boxes):
                 continue
             image = load_image(self.p.image_path(img))
             w, h = image.width(), image.height()
             stem = Path(img).stem
-            for i, b in enumerate(boxes, start=1):
+            for i, b in enumerate(boxes, start=1):   # sıra numarası fotoğraftaki asıl sıra
+                if not box_wanted(self.crop_filter, b):
+                    continue
                 bx1, bx2 = sorted((b["x1"], b["x2"]))
                 by1, by2 = sorted((b["y1"], b["y2"]))
                 x1 = max(0, int(bx1) - pad)
@@ -333,6 +336,25 @@ class Exporter:
             target = dst / img
             if not target.exists():
                 shutil.copy2(self.p.image_path(img), target)
+
+
+def box_wanted(crop_filter, box):
+    """Kesilmiş kutular seçimi: kutu kesilecek mi?
+    crop_filter None ise hepsi. {sınıf: {özellik: {seçenekler} ya da None}}: None o özellikte hepsi demek.
+    Özelliği seçilmemiş kutu, sadece o özellikte hepsi işaretliyse alınır."""
+    if crop_filter is None:
+        return True
+    attrs = crop_filter.get(box["sinif"])
+    if attrs is None:
+        return False
+    values = box.get("attributeler", {})
+    for attr, allowed in attrs.items():
+        if allowed is None:
+            continue
+        v = values.get(attr)
+        if not v or v not in allowed:
+            return False
+    return True
 
 
 def draw_boxes(image: QImage, boxes, color_fn):
