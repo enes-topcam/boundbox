@@ -1728,12 +1728,21 @@ class MainWindow(QMainWindow):
             return
         QApplication.restoreOverrideCursor()
         self.statusBar().showMessage("Dışa aktarma tamamlandı.", 5000)
-        text = f"{len(ex.images)} fotoğraf dışa aktarıldı:\n{out}"
+        only_crops = dlg.formats() == ["kirp"]
+        text = f"{len(ex.images)} fotoğraf işlendi." if only_crops \
+            else f"{len(ex.images)} fotoğraf dışa aktarıldı:\n{out}"
+        if ex.notes:
+            text += "\n\n" + "\n".join(ex.notes)
         if warnings:
             text += "\n\n" + "\n".join(warnings)
         box = QMessageBox(QMessageBox.Icon.Information, "Tamam", text, parent=self)
+        crop_btn = None
+        if ex.crop_count:
+            crop_btn = box.addButton("Yeni projeyi aç", QMessageBox.ButtonRole.ActionRole)
         open_btn = box.addButton("Klasörü Aç", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("Kapat", QMessageBox.ButtonRole.RejectRole)
         box.exec()
-        if box.clickedButton() == open_btn:
-            os.startfile(out)
+        if crop_btn is not None and box.clickedButton() == crop_btn:
+            self.open_project(opts["crop_project"])
+        elif box.clickedButton() == open_btn:
+            os.startfile(opts["crop_project"] if only_crops else out)

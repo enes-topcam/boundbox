@@ -7,6 +7,7 @@ Fotoğraflara dikdörtgen kutu çizip sınıf ve özellik (attribute) atamak iç
 - Sınıflar ve seçmeli özellikler (ör. `corba` → `mercimek / ezogelin / mantar`)
 - CVAT for images 1.1 XML içe aktarma
 - Dışa aktarma: JSON, COCO, YOLO, Pascal VOC XML, CVAT XML, etiketli JPG
+- Kesilmiş kutular: her kutu, kenarlarından ayarlanabilir piksel payla kesilir ve seçilen klasörde **yeni bir proje** olarak kaydedilir. Sınıflar aynen kopyalanır, her kesitte asıl kutu aynı sınıf ve seçeneklerle etiketli gelir.
 - Açık / koyu tema (sağ üstten seçilir, "Sistem" Windows ayarını takip eder)
 - Sesle seçim: "mercimek çorbası" de, corba → mercimek seçilsin; sen sadece kutuyu çiz
 - Etikete göre gezinme: sağdaki istatistikte bir seçeneğin (ör. `mercimek`) solundaki oka tıkla, o etiketli fotoğraflar açılsın; birine tıklayınca A / D sadece onlarda gezer (üstteki "… filtresi ×" göstergesiyle biter)

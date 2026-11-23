@@ -1,4 +1,5 @@
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QKeySequence, QPixmap, QShortcut
@@ -413,6 +414,20 @@ class LabelDialog(QDialog):
 # =====================================================================
 #  Dışa aktar
 # =====================================================================
+def _stepper(spin):
+    """Sayı kutusunun yanına − / + düğmeleri koyar (temada okları gizli).
+    Etkin / pasif yapmak için dönen widget kullanılır."""
+    box = QWidget()
+    row = QHBoxLayout(box)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(4)
+    spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    row.addWidget(W.tool_button("−", tip="Azalt", slot=spin.stepDown, outline=True, square=True))
+    row.addWidget(spin)
+    row.addWidget(W.tool_button("+", tip="Artır", slot=spin.stepUp, outline=True, square=True))
+    return box
+
+
 class ExportDialog(QDialog):
     FORMATS = [   # (anahtar, ad, açıklama, varsayılan)
         ("json", "JSON", "Proje etiketleri", True),
@@ -421,6 +436,7 @@ class ExportDialog(QDialog):
         ("voc", "Pascal VOC XML", "Fotoğraf başına XML", False),
         ("yolo", "YOLO", "TXT ve data.yaml", True),
         ("coco", "COCO JSON", "COCO biçiminde tek dosya", False),
+        ("kirp", "Kesilmiş kutular", "Her kutu ayrı, etiketsiz foto", False),
     ]
 
     def __init__(self, project, parent=None):
@@ -467,14 +483,48 @@ class ExportDialog(QDialog):
         self.val_spin.setRange(5, 50)
         self.val_spin.setValue(20)
         self.val_spin.setFixedWidth(64)
-        self.val_check.toggled.connect(self.val_spin.setEnabled)
         vrow.addWidget(self.val_check)
         vrow.addStretch()
         vrow.addWidget(W.label("Val %", "muted"))
-        vrow.addWidget(self.val_spin)
+        val_box = _stepper(self.val_spin)
+        self.val_check.toggled.connect(val_box.setEnabled)
+        vrow.addWidget(val_box)
         yl.addLayout(vrow)
         lay.addWidget(self.ybox)
         self.checks["yolo"].toggled.connect(self.ybox.setEnabled)
+
+        self.cbox = QGroupBox("Kesilmiş kutular · yeni etiketli proje olarak")
+        cv = QVBoxLayout(self.cbox)
+        cv.setSpacing(4)
+        cl = QHBoxLayout()
+        cv.addLayout(cl)
+        cl.addWidget(W.label("Kutunun her kenarından dışarı pay", "muted"))
+        cl.addStretch()
+        self.pad_spin = QSpinBox()
+        self.pad_spin.setRange(0, 500)
+        self.pad_spin.setValue(6)
+        self.pad_spin.setSuffix(" px")
+        self.pad_spin.setFixedWidth(84)
+        cl.addWidget(_stepper(self.pad_spin))
+        prow = QHBoxLayout()
+        prow.setSpacing(6)
+        self.crop_edit = QLineEdit(str(self._default_crop_dir(project)))
+        self.crop_edit.setProperty("path", True)
+        self.crop_edit.setPlaceholderText("Yeni proje klasörü")
+        self.crop_edit.setToolTip("Kesitler bu klasörde yeni bir proje olarak oluşturulur (klasör boş olmalı)")
+        self.crop_edit.textChanged.connect(lambda _=None: self.crop_err.hide())
+        cbrowse = W.push_button("Proje klasörü seç", "folder-open", slot=self._browse_crop)
+        cbrowse.setAutoDefault(False)
+        prow.addWidget(self.crop_edit, 1)
+        prow.addWidget(cbrowse)
+        cv.addLayout(prow)
+        self.crop_err = W.label("", "error")
+        self.crop_err.hide()
+        cv.addWidget(self.crop_err)
+        lay.addWidget(self.cbox)
+        # ayarlara dokunulunca biçimi de işaretle (unutulmasın)
+        self.pad_spin.valueChanged.connect(lambda _=None: self.checks["kirp"].setChecked(True))
+        self.crop_edit.textEdited.connect(lambda _=None: self.checks["kirp"].setChecked(True))
 
         gbox = QGroupBox("Kapsam ve klasör")
         gl = QVBoxLayout(gbox)
@@ -485,6 +535,19 @@ class ExportDialog(QDialog):
         self.copy_images.setChecked(True)
         gl.addWidget(self.only_labeled)
         gl.addWidget(self.copy_images)
+        lrow = QHBoxLayout()
+        self.limit_check = QCheckBox("Sadece ilk N fotoğraf (deneme için)")
+        self.limit_spin = QSpinBox()
+        self.limit_spin.setRange(1, 100000)
+        self.limit_spin.setValue(10)
+        self.limit_spin.setFixedWidth(84)
+        limit_box = _stepper(self.limit_spin)
+        limit_box.setEnabled(False)
+        self.limit_check.toggled.connect(limit_box.setEnabled)
+        lrow.addWidget(self.limit_check)
+        lrow.addStretch()
+        lrow.addWidget(limit_box)
+        gl.addLayout(lrow)
         orow = QHBoxLayout()
         orow.setSpacing(6)
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
@@ -513,10 +576,49 @@ class ExportDialog(QDialog):
         if d:
             self.out_edit.setText(d)
 
+    @staticmethod
+    def _default_crop_dir(project):
+        root = getattr(project, "root", None)
+        if root is None:
+            return ""
+        base = root.parent / f"{root.name}-kesilmis"
+        d, i = base, 2
+        while d.exists() and any(d.iterdir()):
+            d = base.with_name(f"{base.name}-{i}")
+            i += 1
+        return d
+
+    def _browse_crop(self):
+        d = QFileDialog.getExistingDirectory(self, "Kesitler için proje klasörü seçin (boş klasör)",
+                                             self.crop_edit.text())
+        if d:
+            self.crop_edit.setText(d)
+            self.checks["kirp"].setChecked(True)
+
+    def _crop_dir_error(self):
+        text = self.crop_edit.text().strip()
+        if not text:
+            return "Kesitler için bir proje klasörü seç."
+        d = Path(text)
+        if d.exists() and not d.is_dir():
+            return "Seçilen yol bir klasör değil."
+        if d.exists() and any(d.iterdir()):
+            return "Bu klasör boş değil. Boş ya da yeni bir klasör seç."
+        root = getattr(self.p, "root", None)
+        if root is not None and d.resolve() == Path(root).resolve():
+            return "Açık olan projenin klasörü seçilemez."
+        return None
+
     def _ok(self):
         if not self.formats():
             self.err.show()
             return
+        if "kirp" in self.formats():
+            err = self._crop_dir_error()
+            if err:
+                self.crop_err.setText(err)
+                self.crop_err.show()
+                return
         self.accept()
 
     def formats(self):
@@ -529,6 +631,9 @@ class ExportDialog(QDialog):
             "copy_images": self.copy_images.isChecked(),
             "yolo_mode": "sinif_attr" if self.y_attr.isChecked() else "sinif",
             "val_percent": self.val_spin.value() if self.val_check.isChecked() else 0,
+            "crop_padding": self.pad_spin.value(),
+            "crop_project": self.crop_edit.text().strip(),
+            "limit": self.limit_spin.value() if self.limit_check.isChecked() else 0,
         }
 
 

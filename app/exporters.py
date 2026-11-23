@@ -1,5 +1,6 @@
-"""Dışa aktarma: JSON, COCO, YOLO, Pascal VOC XML, CVAT XML, etiketli JPG."""
+"""Dışa aktarma: JSON, COCO, YOLO, Pascal VOC XML, CVAT XML, etiketli JPG, kesilmiş kutular (yeni proje)."""
 import itertools
+import copy
 import json
 import random
 import shutil
@@ -11,6 +12,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QImage
 
 from .imageutil import box_caption, image_size, load_image
+from .project import Project
 
 
 def _xml_write(root: ET.Element, path: Path):
@@ -28,18 +30,25 @@ def _sub(parent, tag, text=None, **attrs):
 
 class Exporter:
     def __init__(self, project, out_dir, only_labeled=True, copy_images=True,
-                 yolo_mode="sinif", val_percent=0, progress=None):
+                 yolo_mode="sinif", val_percent=0, crop_padding=6, crop_project=None, limit=0,
+                 progress=None):
         self.p = project
         self.out = Path(out_dir)
         self.copy_images = copy_images
         self.yolo_mode = yolo_mode          # "sinif" veya "sinif_attr"
         self.val_percent = val_percent
+        self.crop_padding = crop_padding    # kesilen kutunun her kenarına eklenen piksel
+        self.crop_project = crop_project    # kesitlerden oluşturulacak yeni proje klasörü
+        self.crop_count = 0
         self.progress = progress or (lambda text: None)
         self.warnings = []
+        self.notes = []
 
         images = project.list_images()
         if only_labeled:
             images = [i for i in images if project.get_boxes(i)]
+        if limit > 0:
+            images = images[:limit]
         self.images = images
         self._sizes = {}
 
@@ -52,10 +61,12 @@ class Exporter:
         return self._sizes[image]
 
     def run(self, formats):
-        self.out.mkdir(parents=True, exist_ok=True)
+        if any(f != "kirp" for f in formats):
+            self.out.mkdir(parents=True, exist_ok=True)
         jobs = {
             "json": self.export_json, "coco": self.export_coco, "yolo": self.export_yolo,
             "voc": self.export_voc, "cvat": self.export_cvat, "jpg": self.export_jpg,
+            "kirp": self.export_crops,
         }
         for f in formats:
             jobs[f]()
@@ -274,6 +285,46 @@ class Exporter:
             image = load_image(self.p.image_path(img)).convertToFormat(QImage.Format.Format_RGB32)
             draw_boxes(image, self.p.get_boxes(img), self.p.color)
             image.save(str(d / (Path(img).stem + ".jpg")), "JPG", 92)
+
+    # ---------- Kesilmiş kutular → yeni etiketli proje ----------
+    def export_crops(self):
+        """Her kutuyu kenarlarından `crop_padding` piksel taşacak şekilde keser ve
+        `crop_project` klasöründe yeni bir proje oluşturur: aynı sınıflar, her kesitte
+        asıl kutu aynı sınıf / seçeneklerle etiketli."""
+        root = Path(self.crop_project)
+        new = Project.open_or_create(root)
+        new.classes = copy.deepcopy(self.p.classes)
+        new.save()
+        pad = self.crop_padding
+        count = 0
+        for n, img in enumerate(self.images, start=1):
+            self.progress(f"Kutular kesiliyor... {n}/{len(self.images)}")
+            boxes = self.p.get_boxes(img)
+            if not boxes:
+                continue
+            image = load_image(self.p.image_path(img))
+            w, h = image.width(), image.height()
+            stem = Path(img).stem
+            for i, b in enumerate(boxes, start=1):
+                bx1, bx2 = sorted((b["x1"], b["x2"]))
+                by1, by2 = sorted((b["y1"], b["y2"]))
+                x1 = max(0, int(bx1) - pad)
+                y1 = max(0, int(by1) - pad)
+                x2 = min(w, int(round(bx2)) + pad)
+                y2 = min(h, int(round(by2)) + pad)
+                cw, ch = x2 - x1, y2 - y1
+                if cw < 1 or ch < 1:
+                    continue
+                crop = image.copy(x1, y1, cw, ch).convertToFormat(QImage.Format.Format_RGB32)
+                name = f"{stem}_{i}.jpg"
+                crop.save(str(new.image_path(name)), "JPG", 95)
+                nb = copy.deepcopy(b)
+                nb.update(x1=max(0.0, bx1 - x1), y1=max(0.0, by1 - y1),
+                          x2=min(float(cw), bx2 - x1), y2=min(float(ch), by2 - y1))
+                new.set_boxes(name, cw, ch, [nb])
+                count += 1
+        self.crop_count = count
+        self.notes.append(f"{count} kutu kesildi ({pad} px pay), yeni proje:\n{root}")
 
     # ---------- yardımcı ----------
     def _copy_images(self, images, dst):
