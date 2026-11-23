@@ -515,26 +515,39 @@ class Canvas(QWidget):
         p.setBrush(QColor("#FFFFFF"))
         p.drawRoundedRect(r, 2, 2)
 
-    def _draw_label(self, p, rect, text, color, fm):
-        """Kutunun sol üstüne yapışık koyu başlık: ● sınıf › seçenek."""
-        pad, dot = 6, 6
-        avail = max(40, self.width() - rect.left() - 4)
-        text = fm.elidedText(text, Qt.TextElideMode.ElideRight, int(avail - pad * 2 - dot - 5))
-        tw = fm.horizontalAdvance(text) + pad * 2 + dot + 5
-        th = fm.height() + 6
-        x = rect.left() - 1
-        y = rect.top() - th - 1 if rect.top() - th - 1 >= 0 else rect.top() + 2   # en üstteyse içeri al
+    def _draw_label(self, p, rect, text, short, color, fm, strong=False):
+        """Kutunun içinde sol alt köşede küçük koyu etiket: ● sınıf › seçenek.
+        Yan yana / üst üste kutularda etiketler birbirini kapatmasın diye kutu genişliğine sığdırılır;
+        sığmazsa sadece seçenek (ör. "Mercimek") yazılır. Kutu çok alçaksa etiket kutunun hemen altına çıkar."""
+        pad, dot, gap, inset = 4, 5, 4, 4
+        th = fm.height() + 2
+        # kutu genişliği kadar (çok küçük kutuda en az 64 px), ekranın sağından da taşmasın
+        avail = min(max(64.0, rect.width() - 2 * inset), self.width() - rect.left() - inset - 2)
+        room = int(max(16.0, avail - pad * 2 - dot - gap))
+        if fm.horizontalAdvance(text) > room:
+            text = short
+        text = fm.elidedText(text, Qt.TextElideMode.ElideRight, room)
+        tw = fm.horizontalAdvance(text) + pad * 2 + dot + gap
+        x = rect.left() + inset
+        if rect.height() >= th + 2 * inset:
+            y = rect.bottom() - th - inset                 # içeride, sol alt
+        elif rect.bottom() + 2 + th <= self.height():
+            y = rect.bottom() + 3                          # kutu alçak: hemen altına
+        else:
+            y = rect.top() - th - 3                        # en alttaysa üstüne
         r = QRectF(x, y, tw, th)
         path = QPainterPath()
-        path.addRoundedRect(r, 4, 4)
-        p.setPen(QPen(QColor(255, 255, 255, 34), 1))
-        p.setBrush(QColor(theme.LABEL_BG))
+        path.addRoundedRect(r, 3, 3)
+        bg = QColor(theme.LABEL_BG)
+        bg.setAlpha(240 if strong else 200)
+        p.setPen(QPen(QColor(255, 255, 255, 60 if strong else 30), 1))
+        p.setBrush(bg)
         p.drawPath(path)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(color)
         p.drawEllipse(QRectF(x + pad, r.center().y() - dot / 2, dot, dot))
         p.setPen(QColor("#FFFFFF"))
-        p.drawText(QRectF(x + pad + dot + 5, y, tw, th), Qt.AlignmentFlag.AlignVCenter, text)
+        p.drawText(QRectF(x + pad + dot + gap, y, tw, th), Qt.AlignmentFlag.AlignVCenter, text)
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -558,10 +571,8 @@ class Canvas(QWidget):
         self._draw_image(p)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        font = theme.ui_font(12, QFont.Weight.DemiBold)
-        p.setFont(font)
-        fm = p.fontMetrics()
         outline = QColor(18, 24, 38, 143)
+        labels = []                # (öncelik, rect, yazı, renk): kutulardan sonra, en üstte çizilir
 
         for i, b in enumerate(self.boxes):
             color = QColor(self.color_fn(b["sinif"]))
@@ -604,7 +615,14 @@ class Canvas(QWidget):
                     cx = rect.left() if "l" in sides else rect.right() if "r" in sides else rect.center().x()
                     cy = rect.top() if "t" in sides else rect.bottom() if "b" in sides else rect.center().y()
                     self._handle(p, QPointF(cx, cy), 11)
-            self._draw_label(p, rect, box_label(b), color, fm)
+            short = " › ".join(v for v in b.get("attributeler", {}).values() if v) or b["sinif"]
+            labels.append((2 if selected else 1 if i == self.hover else 0, i, rect, box_label(b), short, color))
+
+        # etiketler: seçili / üstüne gelinen kutununki en üstte kalsın
+        p.setFont(theme.ui_font(10, QFont.Weight.DemiBold))
+        fm = p.fontMetrics()
+        for prio, _i, rect, text, short, color in sorted(labels, key=lambda t: (t[0], t[1])):
+            self._draw_label(p, rect, text, short, color, fm, strong=prio > 0)
 
         # çizim önizlemesi
         if self.first is not None and self.mouse is not None:
