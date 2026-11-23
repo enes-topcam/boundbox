@@ -3,7 +3,7 @@
 Fotoğraflara dikdörtgen kutu çizip sınıf ve özellik (attribute) atamak için masaüstü etiketleme aracı. PySide6 ile yazıldı.
 
 - Kutu çizme, seçme, silme, geri alma
-- Kutu düzeltme: kenarına / köşesine tıkla, yeni yerine götürüp tekrar tıkla (sürüklemek de olur); kenardan yeni kutu başlatmak için Shift + tık
+- Kutu düzeltme: **Shift** basılıyken kenarına / köşesine tıkla, yeni yerine götürüp tekrar tıkla (sürüklemek de olur). Tuşa basmadan: kutuya sağ tık > **Kutuyu düzenle**. Düzenleme tuşu Ayarlar > Genel kısayollar'dan Shift / Ctrl / Alt yapılabilir; tuş basılı değilken kenara tıklamak yeni kutu başlatır
 - Sınıflar ve seçmeli özellikler (ör. `corba` → `mercimek / ezogelin / mantar`)
 - CVAT for images 1.1 XML içe aktarma
 - Dışa aktarma: JSON, COCO, YOLO, Pascal VOC XML, CVAT XML, etiketli JPG
@@ -48,7 +48,7 @@ Windows'ta `baslat.bat` dosyasına çift tıklayarak da açabilirsin.
 | Ctrl+Del | Fotoğrafı sil |
 | Ctrl+Z | Geri al |
 | Esc | Çizimi / kenar düzeltmeyi iptal et |
-| Shift + tık | Kutunun kenarından yeni kutu başlat (düzeltme yerine) |
+| Shift + tık / sürükle | Kutunun kenarını / köşesini düzelt (tuş ayarlardan değişir) |
 | X | Seçimi sıfırla |
 | Ctrl+E | Dışa aktar |
 | Ctrl+I | İstatistik penceresi |

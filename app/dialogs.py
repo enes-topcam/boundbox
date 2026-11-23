@@ -1036,6 +1036,15 @@ class SettingsDialog(QDialog):
             ed = _key_edit(current[k])
             grid.addWidget(ed, row, 1)
             self.general_edits[k] = ed
+        row = len(shortcuts.GENERAL)
+        mod_label = QLabel("Kutu kenarını düzenleme tuşu (basılı tutup kenarı / köşeyi sürükle)")
+        mod_label.setToolTip("Bu tuş basılı değilken kutunun kenarına tıklamak yeni kutu başlatır.\n"
+                             "Tuşa basmadan düzenlemek için kutuya sağ tıkla > Kutuyu düzenle.")
+        grid.addWidget(mod_label, row, 0)
+        self.edit_mod_combo = QComboBox()
+        self.edit_mod_combo.addItems(shortcuts.EDIT_MODIFIERS)
+        self.edit_mod_combo.setCurrentText(shortcuts.load_edit_modifier(settings))
+        grid.addWidget(self.edit_mod_combo, row, 1)
         grid.setColumnStretch(0, 1)
         l2v.addLayout(grid)
         l2v.addStretch()
@@ -1147,6 +1156,7 @@ class SettingsDialog(QDialog):
                         QKeySequence(str(j + 1) if j < 9 else ""))
         for k, _t, default in shortcuts.GENERAL:
             self.general_edits[k].setKeySequence(QKeySequence(default))
+        self.edit_mod_combo.setCurrentText(shortcuts.EDIT_MODIFIER_DEFAULT)
 
     def _mirror_key_edit(self, k):
         """'Genel kısayollar'daki tuş kutusunun bu sekmedeki eşi: biri değişince öbürü de değişir."""
@@ -1250,6 +1260,7 @@ class SettingsDialog(QDialog):
                                     if (t := self.option_voice[(c["ad"], a["ad"], v)].text().strip())}
         self.p.save()
         shortcuts.save_general(self.settings, {k: _key_text(ed) for k, ed in self.general_edits.items()})
+        shortcuts.save_edit_modifier(self.settings, self.edit_mod_combo.currentText())
         self.settings.setValue("ses/mod", next((k for k, rb in self.mode_buttons.items() if rb.isChecked()), "baskonus"))
         self.accept()
 

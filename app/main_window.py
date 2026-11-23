@@ -568,6 +568,7 @@ class MainWindow(QMainWindow):
                 self.key_objects.append(s)
 
         g = shortcuts.load_general(self.settings)
+        self.canvas.set_edit_modifier(shortcuts.load_edit_modifier(self.settings))
         actions = {
             "onceki": lambda: self.step(-1), "sonraki": lambda: self.step(1),
             "sigdir": self.canvas.fit, "foto_sil": self.delete_images,
@@ -1532,11 +1533,16 @@ class MainWindow(QMainWindow):
         m = QMenu(self)
         a_edit = m.addAction("Etiketi düzenle")
         W.set_icon(a_edit, "pencil")
+        mod = shortcuts.load_edit_modifier(self.settings)
+        a_resize = m.addAction(f"Kutuyu düzenle (kenar / köşe)\t{mod} + sürükle")
+        W.set_icon(a_resize, "square-dashed")
         a_del = m.addAction("Kutuyu sil")
         W.set_icon(a_del, "trash-2")
         chosen = m.exec(pos)
         if chosen == a_edit:
             self.edit_box(i)
+        elif chosen == a_resize:
+            self.canvas.arm_edit(i)
         elif chosen == a_del:
             self.delete_box(i)
 

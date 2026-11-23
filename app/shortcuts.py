@@ -21,6 +21,20 @@ GENERAL = [
 ]
 
 
+# kutu kenarını düzenlemek için basılı tutulan tuş (ayarlardan değişir)
+EDIT_MODIFIERS = ["Shift", "Ctrl", "Alt"]
+EDIT_MODIFIER_DEFAULT = "Shift"
+
+
+def load_edit_modifier(settings) -> str:
+    v = settings.value("kisayol/kutu_duzenle_tus", EDIT_MODIFIER_DEFAULT)
+    return v if v in EDIT_MODIFIERS else EDIT_MODIFIER_DEFAULT
+
+
+def save_edit_modifier(settings, name: str):
+    settings.setValue("kisayol/kutu_duzenle_tus", name if name in EDIT_MODIFIERS else EDIT_MODIFIER_DEFAULT)
+
+
 def norm(key: str) -> str:
     """Tuş metnini standart biçime çevirir ('ctrl+delete' -> 'Ctrl+Del')."""
     if not key:

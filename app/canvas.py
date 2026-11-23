@@ -4,14 +4,15 @@
 - Tekerlek: mouse'un olduğu yere doğru zoom
 - Sağ tık basılı tutup sürükle (veya orta tuş): fotoğrafta gezin
 - Sağ tık (sürüklemeden): çizimi iptal eder; çizim yokken kutunun üstünde menü açar
-- Kutunun kenarına / köşesine sol tık: o kenar fareyi takip eder, ikinci tıkla yerine oturur
-  (basılı tutup sürüklemek de olur). Kenardan yeni kutu başlatmak için Shift + tık.
+- Kutu kenarını düzenleme sadece düzenleme tuşu (varsayılan Shift, ayarlardan değişir) basılıyken
+  ya da sağ tık > "Kutuyu düzenle" denince açılır. O zaman kenara / köşeye sol tık: kenar fareyi
+  takip eder, ikinci tıkla yerine oturur (basılı tutup sürüklemek de olur).
 """
 import math
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
 from . import theme
 from .imageutil import box_label
@@ -29,6 +30,11 @@ _HANDLE_CURSORS = {
     frozenset("lt"): Qt.CursorShape.SizeFDiagCursor, frozenset("rb"): Qt.CursorShape.SizeFDiagCursor,
     frozenset("rt"): Qt.CursorShape.SizeBDiagCursor, frozenset("lb"): Qt.CursorShape.SizeBDiagCursor,
 }
+
+_MODIFIERS = {"Shift": Qt.KeyboardModifier.ShiftModifier,
+              "Ctrl": Qt.KeyboardModifier.ControlModifier,
+              "Alt": Qt.KeyboardModifier.AltModifier}
+_MODIFIER_KEYS = (Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Meta)
 
 
 class Canvas(QWidget):
@@ -69,7 +75,12 @@ class Canvas(QWidget):
         self.hover = -1
         self.pan = None            # {"start", "ox", "oy", "button", "moved"}
         self.edit = None           # kenar düzenleme: {"i", "sides", "orig", "rect", "press", "held", "moved"}
+        self.armed = -1            # sağ tık > "Kutuyu düzenle" ile düzenlemeye açılan kutu
+        self.edit_mod_name = "Shift"
+        self.edit_mod = Qt.KeyboardModifier.ShiftModifier
         self._hint_text = None
+        # düzenleme tuşuna basınca / bırakınca imleç fare kımıldamadan da değişsin
+        QApplication.instance().installEventFilter(self)
 
     # ================================================================
     #  Dışarıdan çağrılanlar
@@ -81,6 +92,7 @@ class Canvas(QWidget):
         self.boxes = boxes
         self.first = None
         self.edit = None
+        self.armed = -1
         self.selected = -1
         self.hover = -1
         self._place_empty_button()
@@ -110,18 +122,52 @@ class Canvas(QWidget):
         self.boxes = boxes
         if self.edit and self.edit["i"] >= len(boxes):
             self.edit = None
-            self._emit_hint()
+        if self.armed >= len(boxes):
+            self.armed = -1
         if self.selected >= len(boxes):
             self.selected = -1
+        self._update_cursor()
         self.update()
 
     def set_selected(self, index):
         self.selected = index
+        if self.armed >= 0 and index != self.armed:
+            self.armed = -1
+            self._update_cursor()
         self.update()
+
+    def set_edit_modifier(self, name):
+        """Kenar düzenlemek için basılı tutulacak tuş: "Shift", "Ctrl" ya da "Alt"."""
+        self.edit_mod_name = name if name in _MODIFIERS else "Shift"
+        self.edit_mod = _MODIFIERS[self.edit_mod_name]
+        self._hint_text = None
+        self._update_cursor()
+
+    def arm_edit(self, i):
+        """Sağ tık > "Kutuyu düzenle": tuşa basmadan bu kutunun kenarları tutulabilir (Esc ile biter)."""
+        if not (0 <= i < len(self.boxes)):
+            return
+        self.first = None
+        self.edit = None
+        self.armed = i
+        self.selected = i
+        self.setFocus()
+        self._update_cursor()
+        self.update()
+
+    def _mod_held(self, mods=None):
+        if mods is None:
+            mods = QApplication.queryKeyboardModifiers()
+        return bool(mods & self.edit_mod)
 
     def cancel(self):
         if self.edit is not None:
             self.edit = None
+            self._update_cursor()
+            self.update()
+            return True
+        if self.armed >= 0:
+            self.armed = -1
             self._update_cursor()
             self.update()
             return True
@@ -189,10 +235,18 @@ class Canvas(QWidget):
         ]
         return min(hits)[1] if hits else -1
 
-    def _handle_at(self, p):
-        """Farenin altındaki kutu kenarı / köşesi: (kutu index, {"l","r","t","b"} alt kümesi) ya da None."""
+    def _handle_at(self, p, mods=None):
+        """Farenin altındaki kutu kenarı / köşesi: (kutu index, {"l","r","t","b"} alt kümesi) ya da None.
+        Düzenleme tuşu basılı değilse sadece sağ tıkla düzenlemeye açılan kutu yakalanır."""
+        if self._mod_held(mods):
+            candidates = range(len(self.boxes))
+        elif 0 <= self.armed < len(self.boxes):
+            candidates = (self.armed,)
+        else:
+            return None
         best = None
-        for i, b in enumerate(self.boxes):
+        for i in candidates:
+            b = self.boxes[i]
             a, c = self.to_widget(b["x1"], b["y1"]), self.to_widget(b["x2"], b["y2"])
             left, right = sorted((a.x(), c.x()))
             top, bottom = sorted((a.y(), c.y()))
@@ -272,9 +326,13 @@ class Canvas(QWidget):
         elif self.first is not None:
             text = "Sağ alt köşeye tıkla · Esc iptal"
         elif self.cursor().shape() != Qt.CursorShape.CrossCursor:
-            text = "Kenarı taşımak için tıkla ya da sürükle · Shift + tık: yeni kutu"
+            text = "Kenarı taşımak için tıkla ya da sürükle"
+            if self.armed >= 0:
+                text += " · Esc: düzenlemeyi bitir"
+        elif self.armed >= 0:
+            text = "Düzenlenecek kutunun kenarını / köşesini tut · Esc ya da boşa tık: bitir"
         else:
-            text = "Sol üst köşeye tıkla"
+            text = f"Sol üst köşeye tıkla · {self.edit_mod_name} basılı: kutu kenarını düzenle"
         if text != self._hint_text:
             self._hint_text = text
             self.hint.emit(text)
@@ -322,10 +380,15 @@ class Canvas(QWidget):
                 self._move_edit(p)
                 self._finish_edit()
                 return
-            shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            handle = self._handle_at(p) if self.first is None and not shift else None
+            handle = self._handle_at(p, e.modifiers()) if self.first is None else None
             if handle:
                 self._start_edit(handle[0], handle[1], p)
+                self.update()
+                return
+            if self.armed >= 0 and self.first is None:
+                # düzenleme modundayken boşa tık: modu bitirir, yanlışlıkla kutu başlatmaz
+                self.armed = -1
+                self._update_cursor()
                 self.update()
                 return
             if self.first is None:
@@ -395,7 +458,15 @@ class Canvas(QWidget):
     def leaveEvent(self, e):
         self.mouse = None
         self.hover = -1
+        self._update_cursor()
         self.update()
+
+    def eventFilter(self, obj, ev):
+        # düzenleme tuşuna basılınca / bırakılınca imleç ve ipucu hemen güncellensin
+        if ev.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and ev.key() in _MODIFIER_KEYS \
+                and self.mouse is not None and self.isVisible():
+            self._update_cursor()
+        return False
 
     # ================================================================
     #  Çizim
@@ -500,7 +571,8 @@ class Canvas(QWidget):
                 rect = QRectF(self.to_widget(x1, y1), self.to_widget(x2, y2)).normalized()
             else:
                 rect = QRectF(self.to_widget(b["x1"], b["y1"]), self.to_widget(b["x2"], b["y2"])).normalized()
-            selected = i == self.selected or editing
+            armed = i == self.armed and not editing
+            selected = i == self.selected or editing or armed
             width = 3 if selected else 2
             if i == self.hover or selected:
                 fill = QColor(color)
@@ -512,6 +584,10 @@ class Canvas(QWidget):
             p.drawRect(rect.adjusted(-width / 2 - 0.5, -width / 2 - 0.5, width / 2 + 0.5, width / 2 + 0.5))
             p.setPen(QPen(color, width))
             p.drawRect(rect)
+            if armed:
+                # sağ tıkla düzenlemeye açıldı: bütün kenarlar kesikli
+                p.setPen(QPen(QColor(theme.EDIT_EDGE), 2, Qt.PenStyle.DashLine))
+                p.drawRect(rect)
             if editing:
                 # taşınan kenar(lar) kesikli
                 p.setPen(QPen(QColor(theme.EDIT_EDGE), 3, Qt.PenStyle.DashLine))
